@@ -169,3 +169,71 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
     a.seed("Seed task")
     assert a.step() is False  # stops due to goal check YES
     assert seen["goal_check_prompt"] is True
+
+
+def test_queue_empty_no_seam_calls(agent, monkeypatch):
+    """Queue empty → step() returns False and no LLM/seams are called."""
+    import eck.agent as agent_mod
+
+    # Clear queue
+    agent.queue.clear()
+    assert len(agent.queue) == 0
+
+    # Raise if any seam is called
+    def raise_if_called(*args, **kwargs):
+        raise AssertionError("No seams should be called when queue is empty")
+
+    monkeypatch.setattr(agent_mod, "generate_prediction", raise_if_called)
+    monkeypatch.setattr(agent_mod, "critic_evaluate", raise_if_called)
+    monkeypatch.setattr(agent_mod, "execute_task", raise_if_called)
+    monkeypatch.setattr(agent_mod, "generate_subtasks", raise_if_called)
+
+    # Step should return False immediately
+    assert agent.step() is False
+
+
+def test_enforced_full_execution_and_subtasks_allowed(agent, monkeypatch):
+    """ENFORCED + FULL → execution happens and subtasks are allowed."""
+    import eck.agent as agent_mod
+
+    agent.seed("Seed task")
+
+    monkeypatch.setattr(agent.drift, "get_policy_mode", lambda: PolicyMode.ENFORCED)
+    monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "FULL")
+
+    # Hard-assert the gate is consulted and allows execution
+    should_execute_calls = []
+    def assert_full_and_true(policy_mode, breadth):
+        should_execute_calls.append((policy_mode, breadth))
+        assert policy_mode == PolicyMode.ENFORCED
+        assert breadth == "FULL"
+        return True
+    monkeypatch.setattr(agent_mod, "should_execute", assert_full_and_true)
+
+    # Keep the rest deterministic / low-coupling
+    monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
+    monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "", 0.0))
+
+    executed = {"called": False}
+    def mark_executed(*args, **kwargs):
+        executed["called"] = True
+        return "outcome"
+    monkeypatch.setattr(agent_mod, "execute_task", mark_executed)
+
+    subtasks_generated = {"called": False}
+    def mark_subtasks(*args, **kwargs):
+        subtasks_generated["called"] = True
+        return ["sub1"]
+    monkeypatch.setattr(agent_mod, "generate_subtasks", mark_subtasks)
+
+    assert agent.step() is True
+
+    assert executed["called"] is True, "Execution should have been called"
+    assert subtasks_generated["called"] is True, "Subtask generation should have been called"
+    assert len(agent.queue) > 0, "Subtasks should have been enqueued"
+
+    # should_execute consulted twice (exec + subtask gen)
+    assert should_execute_calls == [
+        (PolicyMode.ENFORCED, "FULL"),
+        (PolicyMode.ENFORCED, "FULL"),
+    ]
