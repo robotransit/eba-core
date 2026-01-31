@@ -51,6 +51,8 @@ def test_build_prediction_context_includes_entries(monkeypatch, memory):
     assert "Past task" in out
     assert "Past outcome" in out
     assert "Success: False" in out
+    # Optional high-signal check: feedback should appear if present
+    assert "Past feedback" in out
 
 
 def test_generate_prediction_normalizes_whitespace(memory):
@@ -99,3 +101,22 @@ def test_generate_prediction_includes_memory_context_in_prompt(monkeypatch, memo
     assert seen["prompt"] is not None
     assert "Relevant past outcomes:" in seen["prompt"]
     assert "Predict the expected outcome" in seen["prompt"]
+
+
+def test_memory_retrieval_gating_disabled_no_calls(monkeypatch, memory):
+    """When enable_memory_retrieval=False, no retrieval methods are called."""
+    cfg = ECKConfig(enable_memory_retrieval=False)
+
+    def raise_if_called(*args, **kwargs):
+        raise AssertionError("Memory retrieval should not be called when disabled")
+
+    monkeypatch.setattr(memory, "retrieve_similar", raise_if_called)
+
+    # Test direct context builder
+    _ = build_prediction_context("task", "obj", memory, cfg)
+
+    def llm(prompt: str) -> str:
+        return "ok"
+
+    # Test public entrypoint (generate_prediction)
+    _ = generate_prediction("task", "obj", llm, memory, cfg)
