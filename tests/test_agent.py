@@ -179,6 +179,7 @@ def test_policy_mode_upgrades_are_irreversible(monkeypatch):
     monkeypatch.setattr(a.drift, "register_drift", lambda *a, **k: None)
     monkeypatch.setattr(a.drift, "clear_streak", lambda *a, **k: None)
 
+    # NORMAL -> GUIDED -> ENFORCED -> (attempted downgrade) NORMAL
     seq = iter([PolicyMode.GUIDED, PolicyMode.ENFORCED, PolicyMode.NORMAL])
     monkeypatch.setattr(a.drift, "get_policy_mode", lambda: next(seq))
 
@@ -200,6 +201,36 @@ def test_policy_mode_upgrades_are_irreversible(monkeypatch):
     assert a.drift.config is a.config
 
 
+def test_manual_policy_mode_precedence_over_lower_drift_recommendation(monkeypatch):
+    """
+    Manual override (config.policy_mode) takes precedence over a *lower* drift recommendation.
+    If user sets ENFORCED and drift recommends NORMAL, the agent must not downgrade.
+    """
+    import eck.agent as agent_mod
+
+    a = ECKAgent(
+        objective="Test manual policy precedence",
+        llm_call=dummy_llm,
+        config=ECKConfig(policy_mode=PolicyMode.ENFORCED),
+    )
+
+    # Drift recommends a LOWER mode; must NOT downgrade.
+    monkeypatch.setattr(a.drift, "get_policy_mode", lambda: PolicyMode.NORMAL)
+
+    # Keep step deterministic and cheap (no execution/subtasks).
+    monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
+    monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "DEFERRED")
+    monkeypatch.setattr(agent_mod, "should_execute", lambda *a, **k: False)
+    monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "", 0.0))
+
+    a.seed("t1")
+    assert a.step() is True
+
+    # Manual mode preserved (no downgrade), and config remains authoritative.
+    assert a.current_policy_mode == PolicyMode.ENFORCED
+    assert a.config.policy_mode == PolicyMode.ENFORCED
+
+
 def test_goal_check_yes_stops_step_early(monkeypatch):
     """If the goal-check prompt returns YES, step() stops early (returns False)."""
     import eck.agent as agent_mod
@@ -210,6 +241,7 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
         # Match exact phrase from GOAL_ACHIEVED_PROMPT
         if 'Answer ONLY "YES" or "NO"' in prompt:
             seen["goal_check_prompt"] = True
+            # Prove this is the goal-check prompt (injected fields)
             assert "Objective: Test objective" in prompt
             assert "Latest result: outcome" in prompt
             return "YES"
@@ -312,3 +344,44 @@ def test_task_lifecycle_recording_in_one_step(monkeypatch):
     assert final["outcome"] == "outcome"
     assert final["success"] is True
     assert final["feedback"] == "good"
+
+
+def test_guided_mode_does_not_block_execution_on_deferred(monkeypatch):
+    """GUIDED is advisory: DEFERRED recommendation must not hard-block when should_execute=True."""
+    import eck.agent as agent_mod
+
+    # IMPORTANT: do NOT use the ENFORCED fixture agent here.
+    a = ECKAgent(
+        objective="Test guided semantics",
+        llm_call=dummy_llm,
+        config=ECKConfig(policy_mode=PolicyMode.GUIDED),
+    )
+
+    a.seed("Seed task")
+
+    # Keep drift from moving us away from GUIDED for this step
+    monkeypatch.setattr(a.drift, "get_policy_mode", lambda: PolicyMode.GUIDED)
+
+    # Worst-case recommendation
+    monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "DEFERRED")
+
+    # Gate says proceed anyway
+    monkeypatch.setattr(agent_mod, "should_execute", lambda *a, **k: True)
+
+    # Keep step deterministic / low coupling
+    monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
+    monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "", 0.0))
+    monkeypatch.setattr(agent_mod, "generate_subtasks", lambda *a, **k: [])
+
+    executed = {"called": False}
+
+    def mark_executed(*args, **kwargs):
+        executed["called"] = True
+        return "outcome"
+
+    monkeypatch.setattr(agent_mod, "execute_task", mark_executed)
+
+    assert a.step() is True
+    assert executed["called"] is True, "GUIDED must not hard-block execution on DEFERRED"
+    assert a.current_policy_mode == PolicyMode.GUIDED
+
