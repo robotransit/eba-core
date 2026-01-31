@@ -119,6 +119,7 @@ def test_enforced_full_execution_and_subtasks_allowed(agent, monkeypatch):
 
     monkeypatch.setattr(agent_mod, "should_execute", assert_full_and_true)
 
+    # Keep the rest deterministic / low-coupling
     monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
     monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "", 0.0))
 
@@ -159,44 +160,44 @@ def test_policy_mode_upgrades_are_irreversible(monkeypatch):
     """
     import eck.agent as agent_mod
 
-    agent = ECKAgent(
+    a = ECKAgent(
         objective="Test irreversible upgrades",
         llm_call=dummy_llm,
         config=ECKConfig(policy_mode=PolicyMode.NORMAL),
     )
 
     # Initial sync check
-    assert agent.drift.config is agent.config
+    assert a.drift.config is a.config
 
     monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
     monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "DEFERRED")
     monkeypatch.setattr(agent_mod, "should_execute", lambda *a, **k: False)
     monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "", 0.0))
 
-    monkeypatch.setattr(agent.drift, "record_error", lambda *a, **k: False)
-    monkeypatch.setattr(agent.drift, "record_feasibility", lambda *a, **k: None)
-    monkeypatch.setattr(agent.drift, "register_drift", lambda *a, **k: None)
-    monkeypatch.setattr(agent.drift, "clear_streak", lambda *a, **k: None)
+    monkeypatch.setattr(a.drift, "record_error", lambda *a, **k: False)
+    monkeypatch.setattr(a.drift, "record_feasibility", lambda *a, **k: None)
+    monkeypatch.setattr(a.drift, "register_drift", lambda *a, **k: None)
+    monkeypatch.setattr(a.drift, "clear_streak", lambda *a, **k: None)
 
     seq = iter([PolicyMode.GUIDED, PolicyMode.ENFORCED, PolicyMode.NORMAL])
-    monkeypatch.setattr(agent.drift, "get_policy_mode", lambda: next(seq))
+    monkeypatch.setattr(a.drift, "get_policy_mode", lambda: next(seq))
 
-    assert agent.current_policy_mode == PolicyMode.NORMAL
+    assert a.current_policy_mode == PolicyMode.NORMAL
 
-    agent.seed("t1")
-    assert agent.step() is True
-    assert agent.current_policy_mode == PolicyMode.GUIDED
-    assert agent.drift.config is agent.config
+    a.seed("t1")
+    assert a.step() is True
+    assert a.current_policy_mode == PolicyMode.GUIDED
+    assert a.drift.config is a.config
 
-    agent.seed("t2")
-    assert agent.step() is True
-    assert agent.current_policy_mode == PolicyMode.ENFORCED
-    assert agent.drift.config is agent.config
+    a.seed("t2")
+    assert a.step() is True
+    assert a.current_policy_mode == PolicyMode.ENFORCED
+    assert a.drift.config is a.config
 
-    agent.seed("t3")
-    assert agent.step() is True
-    assert agent.current_policy_mode == PolicyMode.ENFORCED
-    assert agent.drift.config is agent.config
+    a.seed("t3")
+    assert a.step() is True
+    assert a.current_policy_mode == PolicyMode.ENFORCED
+    assert a.drift.config is a.config
 
 
 def test_goal_check_yes_stops_step_early(monkeypatch):
@@ -206,6 +207,7 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
     seen = {"goal_check_prompt": False}
 
     def goal_yes_llm(prompt: str) -> str:
+        # Match exact phrase from GOAL_ACHIEVED_PROMPT
         if 'Answer ONLY "YES" or "NO"' in prompt:
             seen["goal_check_prompt"] = True
             assert "Objective: Test objective" in prompt
@@ -219,6 +221,7 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
         config=ECKConfig(policy_mode=PolicyMode.NORMAL),
     )
 
+    # Keep the step deterministic and avoid other early exits
     monkeypatch.setattr(a.drift, "get_policy_mode", lambda: PolicyMode.NORMAL)
     monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
     monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "FULL")
@@ -309,4 +312,3 @@ def test_task_lifecycle_recording_in_one_step(monkeypatch):
     assert final["outcome"] == "outcome"
     assert final["success"] is True
     assert final["feedback"] == "good"
-
