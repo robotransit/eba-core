@@ -2,6 +2,7 @@ import pytest
 
 from eck.agent import ECKAgent
 from eck.config import ECKConfig, PolicyMode
+from eck.task import TaskState
 
 
 def dummy_llm(prompt: str) -> str:
@@ -29,39 +30,27 @@ def test_enforced_deferred_no_execution_no_subtasks(agent, monkeypatch):
     # Lock drift recommendation to ENFORCED (prevents upgrade before should_execute)
     monkeypatch.setattr(agent.drift, "get_policy_mode", lambda: PolicyMode.ENFORCED)
 
-    # Force DEFERRED breadth at agent import point
+    # Force DEFERRED breadth
     monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "DEFERRED")
 
-    # Assert should_execute received "DEFERRED" and correct policy mode, then return False
     received_breadth = []
 
     def assert_deferred_and_false(policy_mode, breadth):
         received_breadth.append(breadth)
-        assert breadth == "DEFERRED", "should_execute did not receive DEFERRED"
-        assert (
-            policy_mode == PolicyMode.ENFORCED
-        ), "should_execute did not receive ENFORCED policy mode"
+        assert breadth == "DEFERRED"
+        assert policy_mode == PolicyMode.ENFORCED
         return False
 
     monkeypatch.setattr(agent_mod, "should_execute", assert_deferred_and_false)
 
-    # Raise if execute_task or generate_subtasks called
     def raise_if_called(*args, **kwargs):
         raise AssertionError("Execution or subtask generation should not be called")
 
     monkeypatch.setattr(agent_mod, "execute_task", raise_if_called)
     monkeypatch.setattr(agent_mod, "generate_subtasks", raise_if_called)
 
-    # Run one step — should pop the task, then skip execution + subtask gen
     assert agent.step() is True
-
-    # Confirm should_execute was called with DEFERRED (called twice in step: exec + subtasks)
-    assert received_breadth == [
-        "DEFERRED",
-        "DEFERRED",
-    ], "should_execute was not called with DEFERRED twice"
-
-    # No new subtasks enqueued
+    assert received_breadth == ["DEFERRED", "DEFERRED"]
     assert len(agent.queue) == 0
 
 
@@ -120,7 +109,6 @@ def test_enforced_full_execution_and_subtasks_allowed(agent, monkeypatch):
     monkeypatch.setattr(agent.drift, "get_policy_mode", lambda: PolicyMode.ENFORCED)
     monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "FULL")
 
-    # Hard-assert the gate is consulted and allows execution
     should_execute_calls = []
 
     def assert_full_and_true(policy_mode, breadth):
@@ -131,7 +119,6 @@ def test_enforced_full_execution_and_subtasks_allowed(agent, monkeypatch):
 
     monkeypatch.setattr(agent_mod, "should_execute", assert_full_and_true)
 
-    # Keep the rest deterministic / low-coupling
     monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
     monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "", 0.0))
 
@@ -153,11 +140,10 @@ def test_enforced_full_execution_and_subtasks_allowed(agent, monkeypatch):
 
     assert agent.step() is True
 
-    assert executed["called"] is True, "Execution should have been called"
-    assert subtasks_generated["called"] is True, "Subtask generation should have been called"
-    assert len(agent.queue) > 0, "Subtasks should have been enqueued"
+    assert executed["called"] is True
+    assert subtasks_generated["called"] is True
+    assert len(agent.queue) > 0
 
-    # should_execute consulted twice (exec + subtask gen)
     assert should_execute_calls == [
         (PolicyMode.ENFORCED, "FULL"),
         (PolicyMode.ENFORCED, "FULL"),
@@ -182,7 +168,6 @@ def test_policy_mode_upgrades_are_irreversible(monkeypatch):
     # Initial sync check
     assert agent.drift.config is agent.config
 
-    # Make the step cheap/deterministic (no execution/subtasks)
     monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
     monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "DEFERRED")
     monkeypatch.setattr(agent_mod, "should_execute", lambda *a, **k: False)
@@ -193,8 +178,6 @@ def test_policy_mode_upgrades_are_irreversible(monkeypatch):
     monkeypatch.setattr(agent.drift, "register_drift", lambda *a, **k: None)
     monkeypatch.setattr(agent.drift, "clear_streak", lambda *a, **k: None)
 
-    # Force drift recommendations across steps:
-    # NORMAL -> GUIDED -> ENFORCED -> (attempted downgrade) NORMAL
     seq = iter([PolicyMode.GUIDED, PolicyMode.ENFORCED, PolicyMode.NORMAL])
     monkeypatch.setattr(agent.drift, "get_policy_mode", lambda: next(seq))
 
@@ -203,18 +186,17 @@ def test_policy_mode_upgrades_are_irreversible(monkeypatch):
     agent.seed("t1")
     assert agent.step() is True
     assert agent.current_policy_mode == PolicyMode.GUIDED
-    assert agent.drift.config is agent.config  # Sync after upgrade
+    assert agent.drift.config is agent.config
 
     agent.seed("t2")
     assert agent.step() is True
     assert agent.current_policy_mode == PolicyMode.ENFORCED
-    assert agent.drift.config is agent.config  # Sync after upgrade
+    assert agent.drift.config is agent.config
 
     agent.seed("t3")
     assert agent.step() is True
-    # Must NOT downgrade back to NORMAL
     assert agent.current_policy_mode == PolicyMode.ENFORCED
-    assert agent.drift.config is agent.config  # Sync still holds
+    assert agent.drift.config is agent.config
 
 
 def test_goal_check_yes_stops_step_early(monkeypatch):
@@ -224,10 +206,8 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
     seen = {"goal_check_prompt": False}
 
     def goal_yes_llm(prompt: str) -> str:
-        # Match exact phrase from GOAL_ACHIEVED_PROMPT
         if 'Answer ONLY "YES" or "NO"' in prompt:
             seen["goal_check_prompt"] = True
-            # Prove this is the goal-check prompt (injected fields)
             assert "Objective: Test objective" in prompt
             assert "Latest result: outcome" in prompt
             return "YES"
@@ -239,7 +219,6 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
         config=ECKConfig(policy_mode=PolicyMode.NORMAL),
     )
 
-    # Keep the step deterministic and avoid other early exits
     monkeypatch.setattr(a.drift, "get_policy_mode", lambda: PolicyMode.NORMAL)
     monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "pred")
     monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "FULL")
@@ -249,5 +228,85 @@ def test_goal_check_yes_stops_step_early(monkeypatch):
     monkeypatch.setattr(agent_mod, "generate_subtasks", lambda *a, **k: [])
 
     a.seed("Seed task")
-    assert a.step() is False  # stops due to goal check YES
+    assert a.step() is False
     assert seen["goal_check_prompt"] is True
+
+
+def test_task_lifecycle_recording_in_one_step(monkeypatch):
+    """
+    Single task_id emits lifecycle record() calls:
+    CREATED (seed) → PREDICTED → EXECUTED → final.
+    (WorldModel stores latest-only, so we spy on record() calls instead.)
+    """
+    import eck.agent as agent_mod
+
+    a = ECKAgent(
+        objective="Test lifecycle",
+        llm_call=dummy_llm,
+        config=ECKConfig(policy_mode=PolicyMode.NORMAL),
+    )
+
+    # Force deterministic success path
+    monkeypatch.setattr(a.drift, "get_policy_mode", lambda: PolicyMode.NORMAL)
+    monkeypatch.setattr(agent_mod, "get_recommended_breadth", lambda *a, **k: "FULL")
+    monkeypatch.setattr(agent_mod, "should_execute", lambda *a, **k: True)
+    monkeypatch.setattr(agent_mod, "generate_prediction", lambda *a, **k: "prediction")
+    monkeypatch.setattr(agent_mod, "execute_task", lambda *a, **k: "outcome")
+    monkeypatch.setattr(agent_mod, "critic_evaluate", lambda *a, **k: (True, "good", 0.0))
+    monkeypatch.setattr(agent_mod, "generate_subtasks", lambda *a, **k: [])
+
+    # Spy on record() calls
+    calls = []
+    real_record = a.memory.record
+
+    def record_spy(*, task_id, task_text, prediction, outcome, success, feedback, state, metadata=None):
+        calls.append(
+            {
+                "task_id": task_id,
+                "task_text": task_text,
+                "prediction": prediction,
+                "outcome": outcome,
+                "success": success,
+                "feedback": feedback,
+                "state": state,
+            }
+        )
+        return real_record(
+            task_id=task_id,
+            task_text=task_text,
+            prediction=prediction,
+            outcome=outcome,
+            success=success,
+            feedback=feedback,
+            state=state,
+            metadata=metadata,
+        )
+
+    monkeypatch.setattr(a.memory, "record", record_spy)
+
+    task_text = "Test lifecycle task"
+    a.seed(task_text)
+
+    task_id = a.queue.as_list()[0]["id"]
+    assert len(calls) == 1
+    assert calls[0]["task_id"] == task_id
+    assert calls[0]["state"] == TaskState.CREATED
+
+    assert a.step() is True
+
+    # After step(): +3 calls (PREDICTED, EXECUTED, final)
+    assert [c["state"] for c in calls] == [
+        TaskState.CREATED,
+        TaskState.PREDICTED,
+        TaskState.EXECUTED,
+        TaskState.SUCCEEDED,
+    ]
+
+    final = calls[-1]
+    assert final["task_id"] == task_id
+    assert final["task_text"] == task_text
+    assert final["prediction"] == "prediction"
+    assert final["outcome"] == "outcome"
+    assert final["success"] is True
+    assert final["feedback"] == "good"
+
