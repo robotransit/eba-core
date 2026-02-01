@@ -120,3 +120,54 @@ def test_memory_retrieval_gating_disabled_no_calls(monkeypatch, memory):
 
     # Test public entrypoint (generate_prediction)
     _ = generate_prediction("task", "obj", llm, memory, cfg)
+
+
+def test_prediction_prompt_identity_when_memory_disabled(monkeypatch):
+    """
+    When enable_memory_retrieval=False, the prompt constructed for prediction
+    must be bit-for-bit identical to the case where retrieval is enabled but
+    returns an empty list (i.e., no memory context inserted in either path).
+    """
+    from dataclasses import replace
+
+    memory_enabled = WorldModel()
+    memory_disabled = WorldModel()
+
+    objective = "Achieve world peace through memes"
+    task_text = "Create a viral cat video about unity"
+
+    captured_prompts = []
+
+    def spy_llm(prompt: str) -> str:
+        captured_prompts.append(prompt)
+        return "Fixed prediction output"  # output irrelevant
+
+    base_config = ECKConfig(enable_memory_retrieval=True)
+
+    # Case 1: Enabled + forced empty retrieval → no memory block in prompt
+    monkeypatch.setattr(memory_enabled, "retrieve_similar", lambda **kwargs: [])
+
+    generate_prediction(task_text, objective, spy_llm, memory_enabled, base_config)
+
+    assert len(captured_prompts) == 1
+    prompt_enabled_empty = captured_prompts.pop()
+
+    # Case 2: Retrieval fully disabled
+    config_disabled = replace(base_config, enable_memory_retrieval=False)
+
+    def no_retrieval(**kwargs):
+        raise AssertionError("retrieve_similar must not be called when disabled")
+
+    monkeypatch.setattr(memory_disabled, "retrieve_similar", no_retrieval)
+
+    generate_prediction(task_text, objective, spy_llm, memory_disabled, config_disabled)
+
+    assert len(captured_prompts) == 1
+    prompt_disabled = captured_prompts.pop()
+
+    assert prompt_disabled == prompt_enabled_empty, (
+        "Prompts differ between disabled retrieval and enabled-but-empty retrieval.\n"
+        f"Disabled:\n{repr(prompt_disabled)}\n\n"
+        f"Enabled + empty:\n{repr(prompt_enabled_empty)}"
+    )
+    
