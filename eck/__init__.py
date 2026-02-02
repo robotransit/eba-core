@@ -1,21 +1,17 @@
 """
 Epistemic Control Kernel (ECK).
 
-Provides:
+Minimal reliability-first control kernel for autonomous agents.
+Provides explicit phase separation, epistemic signal recording,
+multi-level drift detection, and policy-gated control.
 
-Prediction vs outcome tracking
-
-Multi-level drift detection
-
-Heuristic self-tuning (numeric bias adaptation)
-
-Guard rails & reset logic
+v0.1.x line is behaviorally stable, test-complete, and invariant-locked.
 """
-
-version = "0.1.0"
 
 from .agent import ECKAgent
 from .config import ECKConfig
+
+__version__ = "0.1.1"
 
 __all__ = [
     "ECKAgent",
