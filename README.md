@@ -16,7 +16,7 @@ If something is not visible in code or tests, **it does not exist**.
 ### Releases
 
 - **v0.1.0** — initial stable kernel  
-- **v0.1.1** — test-suite completion and invariant locking  
+- **v0.1.1** — test-suite completion, invariant locking, packaging fixed  
   *(no runtime changes, no API changes)*
 
 ### v0.1.x Guarantees
@@ -174,18 +174,18 @@ You must supply your own LLM callable.
 from eck.agent import ECKAgent
 
 def llm(prompt: str) -> str:
-    return \"stub response\"
+    return "stub response"  # ← replace with real LLM call
 
 agent = ECKAgent(
-    objective=\"Replace with a real objective\",
+    objective="Replace with a real objective",
     llm_call=llm,
 )
 
-agent.seed(\"Initial task\")
+agent.seed("Initial task")
 
 # Run one or more control cycles
 while agent.step():
-    pass  # add logging / sleep / monitoring here
+    pass  # ← add logging, sleep, timeout, monitoring, or a proper loop condition here
 ```
 
 ---
