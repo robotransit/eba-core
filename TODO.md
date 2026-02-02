@@ -1,99 +1,131 @@
 # TODO.md for Epistemic Control Kernel (ECK)
 
+Last updated: 2026-02-03  
+Current release line: v0.1.1 (stable, invariant-locked)
+
+This file records **intentional future work** for ECK.
+Items may be revised, reordered, or dropped during v0.2.x design without implying
+regression or defect in any released version.
+
 This file outlines outstanding tasks, placeholders, unfinished features, and
-planned enhancements based on a review of the repository state as of
+planned enhancements based on a review of the repository state as of  
 **ECK v0.1.1 (2026-01-27)**.
 
-All items listed here are **explicitly out of scope for the v0.1.x series** and
-do **not** affect the correctness, completeness, or invariants of the
-currently tagged releases (v0.1.0, v0.1.1).
+All items listed here are **explicitly out of scope for the v0.1.x series** and do
+**not** affect the correctness, completeness, or invariants of the currently
+tagged releases (v0.1.0, v0.1.1).
 
 The v0.1.x line is considered **behaviorally stable** and **test-complete**.
-Future work targets v0.2.0 and beyond.
+Future work targets **v0.2.0 and beyond**.
+
+---
 
 ## Core Functionality
-These address placeholders in the code and integrate existing but unused components.
+
+These items address known placeholders in the codebase and the integration of
+existing but currently unused components.
 
 - **High: Implement dynamic rolling confidence signal**  
-  In `eck/agent.py`, `self.current_confidence` is hardcoded to 0.5 with comment
-  "# Current confidence (placeholder — future: rolling signal)".  
+  In `eck/agent.py`, `self.current_confidence` is currently hardcoded to `0.5`
+  with the comment  
+  `"Current confidence (placeholder — future: rolling signal)"`.  
   Integrate an Exponentially Weighted Moving Average (EWMA) mechanism as outlined in:
   - `docs/eck-confidence-ewma-sketch.md`
   - `docs/eck-rolling-confidence-semantics.md`
   - `docs/appendix/eck-confidence-failure-asymmetry.md`  
   Update the agent loop to compute and update confidence based on task outcomes,
-  drifts, and feasibility checks.  
-  **Safety invariant**: Confidence updates cannot directly trigger enforcement
-  without explicit policy mediation.
+  drift signals, and feasibility checks.  
+  **Safety invariant**: Confidence updates must not directly trigger enforcement
+  without explicit policy mediation.  
+  Reference asymmetry semantics in
+  `docs/appendix/eck-confidence-failure-asymmetry.md`.
 
 - **High: Finalize and test memory-aware prediction context wiring**  
-  In `eck/memory.py`, methods like `retrieve_similar` and `retrieve_scored` are
-  implemented and partially wired (memory passed to
+  In `eck/memory.py`, methods such as `retrieve_similar` and `retrieve_scored` are
+  implemented and partially wired (memory is passed into
   `build_prediction_context` via `generate_prediction`).  
-  Complete controlled activation when `config.enable_memory_retrieval` is True,
-  add tests for observability, and ensure read-only influence with no behavioral
-  authority.
+  Complete controlled activation when `config.enable_memory_retrieval` is `True`,
+  add tests for observability, and ensure read-only influence with **no behavioral
+  authority**.
 
 - **Medium: Upgrade task similarity computation to embedding-based cosine similarity**  
-  In `eck/memory.py`, `get_similar` uses a basic string overlap metric, commented
-  "Placeholder similarity function (string overlap) — future: use real cosine sim
-  on embeddings".  
-  Implement using a lightweight embedding library (e.g., sentence-transformers as
-  optional dependency) or a TF-IDF fallback.  
-  Update config thresholds and ensure backward compatibility.
+  In `eck/memory.py`, `get_similar()` (on `WorldModel`) currently uses a basic string
+  overlap metric, with the comment:  
+  `"Placeholder similarity function (string overlap) — future: use real cosine sim on embeddings."`  
+  Replace with an embedding-based cosine similarity approach using:
+  - a lightweight embedding library (e.g. `sentence-transformers`) as an optional
+    dependency, with a stdlib fallback if unavailable, or
+  - a TF-IDF fallback.  
+  Update configuration thresholds and preserve backward compatibility.  
+  **Safety invariant**: Must remain optional (stdlib fallback or config toggle) to
+  preserve the core no-dependency guarantee.
 
 - **Medium: Incorporate unused prompts or remove them**  
-  In `eck/prompts.py`, confirm usage of all prompts.
-  `PRIORITIZATION_PROMPT` and possibly `GOAL_ACHIEVED_PROMPT` lack clear runtime
+  In `eck/prompts.py`, verify actual runtime usage of all defined prompts.
+  `PRIORITIZATION_PROMPT` and possibly `GOAL_ACHIEVED_PROMPT` currently lack clear
   integration.  
-  Integrate (e.g., prioritization after subtask generation) or remove to reduce
-  overhead.
+  Either integrate them (e.g. prioritization after subtask generation) or remove
+  them to reduce conceptual and maintenance overhead.
 
-- **Medium: Define specific formulas and constants for confidence asymmetry**  
-  Formalize EWMA alpha, decay rates, failure penalties, enforcement mechanisms,
-  and persistence (details deferred in
-  `docs/appendix/eck-confidence-failure-asymmetry.md`).  
-  Implement in code (e.g., `drift.py` or a dedicated confidence module) and
-  update documentation.
+- **Medium: Define concrete formulas and constants for confidence asymmetry**  
+  Formalize EWMA parameters, decay rates, failure penalties, enforcement thresholds,
+  and persistence semantics, as deferred in  
+  `docs/appendix/eck-confidence-failure-asymmetry.md`.  
+  Implement in code (e.g. in `drift.py` or a dedicated confidence module) and update
+  documentation accordingly.
 
-- **Low: Document task seeding patterns in README / examples**  
+- **Low: Document task seeding patterns in `README.md` / `examples/*.py`**  
   `ECKAgent.seed()` is already public and functional.  
-  Improve documentation clarity (README.md and/or `examples/basic_run.py`)
-  for seeding patterns.
+  Improve documentation clarity in `README.md` and/or `examples/*.py`
+  to illustrate recommended seeding patterns.
+
+---
 
 ## Testing
+
 Comprehensive deterministic unit and integration tests are in place as of v0.1.1.
-Future testing work focuses on:
-- Regression protection for new features
-- Confidence dynamics (v0.2.0)
-- Performance and scale characteristics
+
+Future testing work (v0.2.0+) may include:
+
+- Regression protection for newly introduced features
+- Confidence dynamics and rolling signal behaviour
+- Performance and scalability characteristics
 
 - **Low: Implement CI workflow**  
-  GitHub Actions: pytest on push/PR, linting (black/flake8), coverage (>80%).  
-  CI must not introduce behavioral dependencies (e.g., network calls, external APIs).
+  Add a GitHub Actions pipeline (pytest on push/PR, formatting, linting, coverage).
+  CI must not introduce behavioral dependencies (e.g. network calls or external APIs).  
+  *(No additional deterministic tests are required for v0.1.x; the existing suite
+  is complete.)*
+
+---
 
 ## Documentation
+
 - **Medium: Add usage guide for policy modes**  
-  Expand `docs/eck-policy-modes.md` with examples of dynamic switching (e.g.,
-  based on drift) and impacts on breadth/confidence.
+  Expand `docs/eck-policy-modes.md` with examples of dynamic switching (e.g. based
+  on drift) and the resulting impacts on execution breadth and confidence.
 
 - **Low: Consolidate confidence documentation**  
-  Merge scattered files (e.g., `eck-confidence.md`,
-  `eck-confidence-breadth.md`,
-  `eck-confidence-observability.md`) into a single guide, cross-referencing
-  asymmetry and EWMA semantics.
+  Merge scattered confidence-related files into a single coherent guide,
+  cross-referencing asymmetry and EWMA semantics in
+  `docs/appendix/eck-confidence-failure-asymmetry.md`.
 
 - **Low: Add CONTRIBUTING.md issue templates**  
-  Templates for bugs, features, and documentation changes.
+  Provide templates for bug reports, feature proposals, and documentation changes.
+
+---
 
 ## Miscellaneous / Refinements
+
 - **Low: Add optional dependencies for advanced features**  
-  Add an `embeddings` extra in `pyproject.toml`
-  (e.g., sentence-transformers). Keep the core stdlib-only.
+  Introduce an `embeddings` extra in `pyproject.toml`
+  (e.g. `sentence-transformers`), while keeping the core strictly stdlib-only.
 
 - **Low: Benchmark and optimize queue/performance**  
-  Test `TaskQueue` for large `max_size` values; add performance tests if
-  scaling becomes relevant.
+  Evaluate `TaskQueue` behaviour at large `max_size` values and add performance
+  tests if scaling becomes relevant.
+
+---
 
 Contributions are welcome; please see `CONTRIBUTING.md` for invariants, scope,
 and contribution guidelines.
