@@ -1,47 +1,36 @@
 # Epistemic Control Kernel (ECK)
 
-**Epistemic Control Kernel (ECK)** — a minimal, reliability-first control kernel for autonomous agents.
+**Epistemic Control Kernel (ECK)** is a minimal, reliability-first control kernel for autonomous agents.
 
-ECK is a framework-agnostic **control and observability core**, designed to sit *beneath* agent behaviour rather than define it.  
-It enforces explicit phase separation, records epistemic signals, detects drift, and provides **policy-gated control seams** without embedding planning, reasoning, or tool ideology.
+ECK is a **framework-agnostic control and observability core**.  
+It is designed to sit *beneath* agent behaviour rather than define it.
 
-ECK prioritises:
-- observability before enforcement  
-- explicit state transitions  
-- testable, auditable invariants  
-- refusal to silently “do the wrong thing”
+ECK enforces explicit phase separation, records epistemic signals, detects drift, and applies **policy-gated control** — without embedding planning, reasoning, tool orchestration, or agent ideology.
 
-This repository contains the **core kernel only** — not a full agent product.
+If something is not visible in code or tests, **it does not exist**.
 
 ---
 
-## Current Status (v0.1.x)
+## Current Status
 
-ECK is in an **early but internally consistent** state.
+### Releases
 
-### Implemented & Stable
+- **v0.1.0** — initial stable kernel  
+- **v0.1.1** — test-suite completion and invariant locking  
+  *(no runtime changes, no API changes)*
 
-- Deterministic agent control loop (`agent.py`)
-- Explicit prediction → execution → evaluation phases
-- Policy-gated execution and subtask generation
-- Critic-mediated outcome evaluation
-- Drift monitoring (error signals, feasibility checks, streak tracking)
-- Append-only task memory with explicit task states
-- Bounded task queue
-- Centralised prompt templates
-- Minimal execution seam (LLM-first, tool-extensible)
-- Strict config-driven thresholds and limits
+### v0.1.x Guarantees
 
-### Explicitly Not Implemented (by design)
+The v0.1.x line is:
 
-- No planning engine
-- No hidden reasoning layer
-- No implicit tool use
-- No asynchronous or parallel execution
-- No task deduplication heuristics
-- No automatic “intelligence amplification”
+- **Behaviorally stable**
+- **Test-complete**
+- **Invariant-locked**
 
-If something is not visible in code or tests, **it does not exist**.
+All core semantics are frozen.  
+No feature work is permitted without a version escalation.
+
+The enforcement surface completed in Commit 4c is fully proven via deterministic invariant tests.
 
 ---
 
@@ -49,7 +38,7 @@ If something is not visible in code or tests, **it does not exist**.
 
 ECK is built around **epistemic control**, not task throughput.
 
-Key principles:
+Core principles:
 
 - **Explicit phases**  
   Prediction, execution, and evaluation are separate and observable.
@@ -58,128 +47,149 @@ Key principles:
   Signals (confidence, drift, feasibility) are recorded *before* they affect behaviour.
 
 - **No silent coupling**  
-  Confidence does not alter behaviour unless an explicit policy mode allows it.
+  Signals do not alter behaviour unless an explicit policy mode allows it.
 
 - **Single execution seam**  
-  All real-world effects flow through one narrow interface.
+  All real-world effects flow through one narrow, auditable interface.
 
 - **Irreversible safety upgrades**  
-  Policy modes can only move in safer directions during runtime.
+  Policy modes may only move in safer directions during runtime.
+
+- **Refusal over fabrication**  
+  The kernel prefers halting or deferring over proceeding incorrectly.
 
 ---
 
 ## Architecture Overview
 
-ECK separates *cognition*, *control*, and *effects*.
+ECK separates **cognition**, **control**, and **effects**.
 
-### Pure / Stateless Components
+### Pure / Stateless Components  
 (no side effects, no memory mutation)
 
 - `prediction.generate_prediction`
 - `task_generation.generate_subtasks`
 
-### Execution Seam
+### Execution Seam  
 (single, auditable effects boundary)
 
 - `execution.execute_task`
 
 ### Stateful Control Layer
 
-- `ECKAgent` — orchestration and policy control
-- `WorldModel` — append-only task history
-- `DriftMonitor` — epistemic error & instability tracking
-- `TaskQueue` — bounded work queue
+- `ECKAgent` — orchestration and policy enforcement  
+- `WorldModel` — append-only task history  
+- `DriftMonitor` — epistemic error and instability tracking  
+- `TaskQueue` — bounded work queue  
 
 This architecture allows ECK to integrate with **any LLM stack** without inheriting framework assumptions.
 
 ---
 
-## Policy Enforcement
+## Policy Modes
 
-ECK can now enforce recommendations in ENFORCED mode across both subtask generation and task execution.  
-When recommended breadth is DEFERRED, generation and execution are skipped for the cycle.  
+ECK supports explicit policy modes:
 
-- Enforcement is minimal, reversible, and fully logged  
-- See Commit 4c for implementation details  
-- See scratch_test_4c.py for a minimal proof-of-concept run demonstrating deferral  
+- **NORMAL** — advisory signals only  
+- **GUIDED** — recommendations visible but not enforced  
+- **ENFORCED** — recommendations may gate execution  
+- **HALT** — immediate stop *(irreversible without manual reset)*  
 
-This completes the core reliability loop within ECK: detection → recommendation → consequence.
+### Invariants (Test-Locked)
+
+- Policy upgrades are **irreversible**
+- User-configured policy mode is authoritative
+- GUIDED mode **must not hard-block execution**
+- ENFORCED mode may defer execution
+- No split-brain: policy state is single-sourced and synchronized
+
+All of the above are enforced by deterministic tests.
 
 ---
 
-## What ECK Is *Not*
+## Memory & Prediction
+
+- Task memory is **append-only**
+- Task lifecycle states are explicit and recorded
+- Memory retrieval can be **fully disabled**
+
+When memory retrieval is disabled:
+
+- No retrieval calls occur *(verified by tests)*
+- Prediction prompts are **bit-for-bit identical** to enabled-but-empty retrieval cases
+
+This prevents silent prompt drift and preserves determinism.
+
+---
+
+## Critic Semantics
+
+- Critic output must be valid JSON with the expected structure.
+- Malformed, empty, or unparseable output results in **deterministic pessimistic failure**:
+  - `success` is `False`
+  - `severity` is `1.0` (maximal failure penalty)
+  - Feedback is a non-empty string (for observability and auditability)
+- Exact feedback wording is **not** part of the contract.
+- Cross-validation disagreement also triggers failure with `severity == 1.0`.
+
+These behaviours are locked by deterministic tests and reflect the kernel’s refusal-over-fabrication posture.
+
+---
+
+## What ECK Is Not
 
 ECK is intentionally narrow.
 
 It is **not**:
 
-- A general agent framework
-- A planner or reasoning engine
-- A tool orchestration system
-- A LangChain / LangGraph replacement
-- A multi-agent system
-- A production-ready autonomous product
-- An opinionated AI ideology
+- A general agent framework  
+- A planner or reasoning engine  
+- A tool orchestration system  
+- A LangChain / LangGraph replacement  
+- A multi-agent system  
+- A production-ready autonomous product  
+- A confidence or factual correctness estimator  
+- An opinionated AI ideology  
 
 ECK exists to make agent behaviour **inspectable, interruptible, and correctable**.
+
+---
+
+## Examples
+
+The `examples/` directory contains **demonstrations only**.
+
+- `basic_run.py` — control-flow demonstration with a stub LLM  
+- `local_llm_run.py` — minimal end-to-end run using a real local LLM  
+
+Examples are **not** reference implementations and are **not** covered by API stability guarantees.
 
 ---
 
 ## Quick Start
 
 You must supply your own LLM callable.
-```
-# First install the package locally
-# pip install -e .
 
+```
 from eck.agent import ECKAgent
 
 def llm(prompt: str) -> str:
-    return "stub response"
+    return \"stub response\"
 
 agent = ECKAgent(
-    objective="Replace with a real objective",
+    objective=\"Replace with a real objective\",
     llm_call=llm,
 )
 
-agent.seed()
-agent.run()
+agent.seed(\"Initial task\")
+
+# Run one or more control cycles
+while agent.step():
+    pass  # add logging / sleep / monitoring here
 ```
-⚠️ A stub LLM will not produce meaningful behaviour — this example demonstrates control flow only.
-
----
-
-## Project Structure
-
-### Core Package (`eck/`)
-
-- **agent.py** — control loop orchestration & policy enforcement  
-- **config.py** — immutable configuration & policy thresholds  
-- **task.py** — canonical task lifecycle states  
-- **queue.py** — bounded task queue  
-- **memory.py** — append-only task history  
-- **prediction.py** — pure prediction generation  
-- **task_generation.py** — pure subtask generation  
-- **execution.py** — execution seam  
-- **critic.py** — outcome evaluation  
-- **drift.py** — drift & instability detection  
-- **utils.py** — safe helpers (parsing, feasibility checks, scoring)  
-- **prompts.py** — centralised prompt templates  
-
----
-
-## Dependencies
-
-ECK intentionally relies almost entirely on the **Python standard library**.
-
-Additional dependencies may be introduced **only** when they provide:
-
-- clear epistemic value
-- testable behaviour
-- no hidden control flow
 
 ---
 
 ## License
 
-MIT License — see the `LICENSE` file for details.
+MIT License — see `LICENSE` for details.
