@@ -1,0 +1,58 @@
+# ADR-031: Similarity Retrieval API Contract
+
+**Status**  
+Locked (semantic invariant for v0.2.0 core)
+
+## Objective
+
+Define the long-term, authoritative API surface and core semantics for similarity-based retrieval in ECK, establishing a deterministic, stdlib-only fallback path while providing a clear, non-breaking extension point for optional advanced similarity mechanisms.
+
+This ADR is strictly scoped to the foundational API contract for A3 (first step in the decomposition) and locks the retrieval interface before any mechanism-specific integration (embeddings/cosine). It builds on the memory context contract (ADR-026) without reopening prior A2 decisions, introducing new authority surfaces, or coupling similarity to confidence, policy modes, breadth, or gating.
+
+## Decisions
+
+1. **Authoritative Retrieval Methods**  
+   Two methods are defined as the long-term surface:  
+   - `retrieve_similar(tasks: List[TaskRecord], query_embedding: Optional[Any], limit: int) -> List[TaskRecord]`  
+     **Role:** Returns the top-N most similar historical tasks based on the current query context.  
+     **Core implementation:** stdlib-only heuristic similarity (e.g., simple string overlap, keyword match, or chronological fallback).  
+   - `retrieve_scored(tasks: List[TaskRecord], query_embedding: Optional[Any], limit: int) -> List[Tuple[TaskRecord, float]]`  
+     **Role:** Returns scored candidates with a similarity score in [0,1].  
+     **Core implementation:** same stdlib-only heuristic, with normalized pseudo-score (e.g., 1.0 for exact match, decaying with distance).  
+
+   Both methods accept an optional `query_embedding` parameter for forward compatibility with optional embeddings.
+
+2. **Fallback When Optional Similarity Disabled/Unavailable**  
+   When advanced similarity (embeddings/cosine) is disabled or the optional dependency is not installed:  
+   - Both methods fall back to deterministic stdlib-only similarity.  
+   - Returned order is stable and version-locked (e.g., reverse-chronological among candidates with equal pseudo-similarity).  
+   - No runtime error or degradation of core agent behavior occurs.
+
+3. **Core Semantics (Always Guaranteed)**  
+   - Both methods always return a list (possibly empty) ordered deterministically according to a stable, version-locked rule.  
+   - Core path never invokes optional code or dependencies.  
+   - Similarity is advisory only: returned items are fed into the existing memory context formatting (ADR-026) without conferring behavioral authority.
+
+## Invariants
+
+- Retrieval methods always return a deterministically ordered list of `TaskRecord` items (stable/version-locked rule).  
+- Core path (no embeddings) uses only stdlib features and never attempts to import or call optional similarity code.  
+- When optional similarity is disabled or unavailable, behavior is identical to core stdlib path (no prompt drift, no behavioral change).  
+- Similarity remains advisory/context only: no behavioral authority is conferred, no override/delegation of generation occurs (prediction owns output).  
+- No coupling exists between similarity retrieval and confidence scoring, task breadth, policy mode transitions, or execution gating.  
+- Returned `TaskRecord` items are immutable by construction with no exposed mutation pathways (per ADR-026).  
+- The `query_embedding` parameter is ignored by the core stdlib fallback path; passing any value does not alter behavior.  
+- Candidates with equal pseudo-similarity are ordered reverse-chronologically by task timestamp (tie-breaker for deterministic ordering).  
+- When no items match, core path returns an empty list, preserving prompt equivalence with disabled/empty retrieval per ADR-026/027.  
+- A2 memory wiring (ADR-026–030), A1 confidence semantics, and §19 red lines remain closed and unaffected.
+
+## Must Never Happen
+
+- Core retrieval path importing, calling, or depending on optional similarity code (embeddings, cosine, etc.).  
+- Optional similarity being enabled by default or required for core functionality.  
+- Retrieval methods raising runtime exceptions when optional dependency is missing/disabled.  
+- Non-deterministic or unstable ordering in either core or optional paths.  
+- Similarity influencing confidence, breadth, policy modes, or gating in any way.  
+- Prompt drift or divergence when toggling optional similarity on/off (must preserve ADR-026/027 equivalence).  
+- Hidden reliance on optional code in core fallback logic.  
+- Reopening or reinterpretation of ADR-026–030 decisions, A1 semantics, or §19 red lines.
