@@ -1,0 +1,46 @@
+# ADR-027: Enable/Disable Semantics for Memory Retrieval
+
+**Status**  
+Locked (semantic invariant for v0.2.0 core)
+
+## Objective
+
+Define the precise semantics and invariants for the enable/disable toggle of memory retrieval in ECK, ensuring the mechanism acts as a hard, deterministic switch that enforces complete isolation when disabled.
+
+This ADR is strictly scoped to A2.2 and builds directly on the foundational retrieval contract established in ADR-026 (A2.1), without reopening any prior decisions, introducing new authority surfaces, or coupling memory to confidence, policy modes, breadth, or gating.
+
+## Decisions
+
+1. **Toggle as Hard Invariant**  
+   The memory retrieval enable/disable state is a single, authoritative configuration value (e.g., via `ECKConfig.enable_memory_retrieval`) that behaves as a hard switch:  
+   - When `false` (disabled), no memory retrieval operation is performed under any circumstances.  
+   - When `true` (enabled), retrieval proceeds according to the contract in ADR-026, subject only to the absence of matching items producing the empty/no-context case.
+
+2. **Behavioral Effect of Disabled State**  
+   In the disabled state:  
+   - No retrieval operations, queries, similarity searches, or index accesses are performed.  
+   - The prediction prompt generation path bypasses all memory-related logic entirely.  
+   - The resulting prompt form is identical to the canonical no-context form defined in ADR-026.
+
+3. **Irreversibility and Determinism During a Run**  
+   Once set at agent initialization or configuration load, the enable/disable state is immutable for the lifetime of the `ECKAgent` instance.  
+   No runtime toggling or value change is permitted without full agent restart/reconfiguration.
+
+## Invariants
+
+- The enable/disable state is a single source of truth and is immutable for the lifetime of the `ECKAgent` instance. Implementations may read the value multiple times, but its value must not change during a run.  
+- When disabled: zero retrieval operations occur; this is observable and testable.  
+- Disabled state produces bit-for-bit identical prompt forms to the no-context baseline, with no residual memory-related tokens, delimiters, or placeholders beyond the canonical empty-case structure.  
+- Enabled state with empty results must produce the same canonical prompt output as the disabled state, as defined in ADR-026. Internal execution paths may differ (e.g., retrieval call vs bypass), but prompt form and generation inputs must be identical.  
+- The toggle introduces no behavioral authority: it controls only whether advisory context is considered, not how generation occurs or whether execution proceeds.  
+- No coupling exists between the toggle and confidence scoring, policy mode transitions, task breadth, or any gating mechanism.  
+- A1 confidence semantics and ADR-026 retrieval contract remain closed and unaffected.
+
+## Must Never Happen
+
+- Any memory retrieval operation, query, similarity search, or index access when the toggle is disabled.  
+- Prompt drift or divergence when toggling between disabled and enabled-with-empty states.  
+- Runtime modification of the enable/disable state during an agent run without explicit restart.  
+- Silent fallback, default context, or residual memory influence when disabled.  
+- The toggle acting as a gate for execution, confidence adjustment, policy upgrade, or any other behavioral control surface.  
+- Reopening or reinterpretation of ADR-026 decisions or A1 semantics.
