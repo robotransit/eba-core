@@ -22,6 +22,7 @@ This file now records only remaining implementation work for the locked v0.2.0 d
 - Convert all locked invariants into code (confidence, memory retrieval, similarity, prompt guardrails, CI workflows)  
 - Maintain strict adherence to the locked red lines and test requirements  
 - Update CI to enforce the new two-layer structure (core + capability)
+- See [v0.2.0 implementation checklist](docs/v0.2.0-implementation-checklist.md) for the detailed ADR-mapped execution plan.
 
 ---
 
