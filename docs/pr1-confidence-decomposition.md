@@ -26,10 +26,16 @@ All changes must preserve: no direct behavioral enforcement by confidence, media
 
 ### 1. Core Confidence Update Mechanism (ADR-021, ADR-025)
 
-- [ ] Implement event-driven confidence update that occurs **only** after a critic evaluation
-- [ ] Implement EWMA smoothing on delta (per ADR-025 semantics)
-- [ ] Ensure bounded range [0.0, 1.0]
-- [ ] Add support for deterministic replay given an identical sequence of critic outcomes
+- [ ] Implement event-driven confidence update that occurs **exactly once** after a critic evaluation and never on cycles without critic output
+- [ ] Implement the update sequence as defined in ADR-025:
+  - Compute raw delta from critic outcome inputs (and any enabled ADR-024 optional downward-only inputs, where applicable)
+  - Apply directional permission gates
+  - Apply EWMA smoothing on the delta
+  - Perform bounded accumulation into [0.0, 1.0] inclusive
+- [ ] Set initial confidence value to 0.5
+- [ ] Explicitly handle Rejected and Deferred outcomes by producing no delta and no update
+- [ ] Add support for deterministic replay: given identical inputs and fixed α, reproduce the exact same confidence trajectory
+- [ ] Ensure the confidence signal is passed only to the policy mediation layer — never consumed directly by execution or action-selection components
 
 ### 2. Critic Outcome Taxonomy (ADR-022)
 
