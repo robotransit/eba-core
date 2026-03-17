@@ -22,6 +22,8 @@ At runtime, the ECK executes a deterministic agent loop in which:
 3. Epistemic signals (such as confidence) are updated according to explicit rules.
 4. Policy logic interprets signals and determines the next permitted execution mode or action.
 
+The kernel operates as a compact, policy-mediated state machine whose state transitions are driven exclusively by deterministic rules and critic-derived signals, never directly by LLM reasoning or capability-layer outputs.
+
 All behavioral influence flows through explicit policy mediation. External signals such as memory retrieval, similarity scores, or prompt scaffolding may provide contextual information but cannot directly alter execution.
 
 This model ensures that cognition-like capabilities remain advisory while the kernel retains full authority over behavior.
