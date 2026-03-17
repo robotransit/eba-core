@@ -1,131 +1,48 @@
-# TODO.md for Epistemic Control Kernel (ECK)
+# TODO
 
-Last updated: 2026-02-03  
-Current release line: v0.1.1 (stable, invariant-locked)
+**Last updated:** 2026-03-17
 
-This file records **intentional future work** for ECK.
-Items may be revised, reordered, or dropped during v0.2.x design without implying
-regression or defect in any released version.
+**Current design baseline:** v0.2.0 (architecture & invariants locked)  
+**Current implementation state:** pre-v0.2.0
 
-This file outlines outstanding tasks, placeholders, unfinished features, and
-planned enhancements based on a review of the repository state as of  
-**ECK v0.1.1 (2026-01-27)**.
+The v0.2.0 design is now complete and formally locked through ADR-020–ADR-037.  
+All major architectural decisions, invariants, guardrails, and CI foundations have been codified.
 
-All items listed here are **explicitly out of scope for the v0.1.x series** and do
-**not** affect the correctness, completeness, or invariants of the currently
-tagged releases (v0.1.0, v0.1.1).
+**Important note:**  
+None of the v0.2.0 ADRs have been converted into implementation code yet.  
+The current codebase remains at the pre-v0.2.0 state. Implementation of the locked v0.2.0 architecture is now the next phase of the project.
 
-The v0.1.x line is considered **behaviorally stable** and **test-complete**.
-Future work targets **v0.2.0 and beyond**.
+This file now records only remaining implementation work for the locked v0.2.0 design and intentional future work beyond v0.2.0. Items from the old v0.1.x TODO list have been retired because they are now covered by the locked ADRs.
 
 ---
 
-## Core Functionality
+## Immediate Next Phase (v0.2.0 Implementation)
 
-These items address known placeholders in the codebase and the integration of
-existing but currently unused components.
-
-- **High: Implement dynamic rolling confidence signal**  
-  In `eck/agent.py`, `self.current_confidence` is currently hardcoded to `0.5`
-  with the comment  
-  `"Current confidence (placeholder — future: rolling signal)"`.  
-  Integrate an Exponentially Weighted Moving Average (EWMA) mechanism as outlined in:
-  - `docs/eck-confidence-ewma-sketch.md`
-  - `docs/eck-rolling-confidence-semantics.md`
-  - `docs/appendix/eck-confidence-failure-asymmetry.md`  
-  Update the agent loop to compute and update confidence based on task outcomes,
-  drift signals, and feasibility checks.  
-  **Safety invariant**: Confidence updates must not directly trigger enforcement
-  without explicit policy mediation.  
-  Reference asymmetry semantics in
-  `docs/appendix/eck-confidence-failure-asymmetry.md`.
-
-- **High: Finalize and test memory-aware prediction context wiring**  
-  In `eck/memory.py`, methods such as `retrieve_similar` and `retrieve_scored` are
-  implemented and partially wired (memory is passed into
-  `build_prediction_context` via `generate_prediction`).  
-  Complete controlled activation when `config.enable_memory_retrieval` is `True`,
-  add tests for observability, and ensure read-only influence with **no behavioral
-  authority**.
-
-- **Medium: Upgrade task similarity computation to embedding-based cosine similarity**  
-  In `eck/memory.py`, `get_similar()` (on `WorldModel`) currently uses a basic string
-  overlap metric, with the comment:  
-  `"Placeholder similarity function (string overlap) — future: use real cosine sim on embeddings."`  
-  Replace with an embedding-based cosine similarity approach using:
-  - a lightweight embedding library (e.g. `sentence-transformers`) as an optional
-    dependency, with a stdlib fallback if unavailable, or
-  - a TF-IDF fallback.  
-  Update configuration thresholds and preserve backward compatibility.  
-  **Safety invariant**: Must remain optional (stdlib fallback or config toggle) to
-  preserve the core no-dependency guarantee.
-
-- **Medium: Incorporate unused prompts or remove them**  
-  In `eck/prompts.py`, verify actual runtime usage of all defined prompts.
-  `PRIORITIZATION_PROMPT` and possibly `GOAL_ACHIEVED_PROMPT` currently lack clear
-  integration.  
-  Either integrate them (e.g. prioritization after subtask generation) or remove
-  them to reduce conceptual and maintenance overhead.
-
-- **Medium: Define concrete formulas and constants for confidence asymmetry**  
-  Formalize EWMA parameters, decay rates, failure penalties, enforcement thresholds,
-  and persistence semantics, as deferred in  
-  `docs/appendix/eck-confidence-failure-asymmetry.md`.  
-  Implement in code (e.g. in `drift.py` or a dedicated confidence module) and update
-  documentation accordingly.
-
-- **Low: Document task seeding patterns in `README.md` / `examples/*.py`**  
-  `ECKAgent.seed()` is already public and functional.  
-  Improve documentation clarity in `README.md` and/or `examples/*.py`
-  to illustrate recommended seeding patterns.
+- Implement the locked v0.2.0 architecture in ADR order, beginning with confidence semantics, then memory retrieval, then similarity/prompt guardrails, then CI  
+- Convert all locked invariants into code (confidence, memory retrieval, similarity, prompt guardrails, CI workflows)  
+- Maintain strict adherence to the locked red lines and test requirements  
+- Update CI to enforce the new two-layer structure (core + capability)
 
 ---
 
-## Testing
+## Future Work (v0.3.0 and beyond)
 
-Comprehensive deterministic unit and integration tests are in place as of v0.1.1.
+**High priority (post-v0.2.0 implementation)**
 
-Future testing work (v0.2.0+) may include:
+- Add comprehensive end-to-end examples and usage patterns  
+- Expand policy mode examples and dynamic switching guidance  
+- Benchmark TaskQueue and memory retrieval at scale  
+- Explore optional advanced memory scoring mechanisms (subject to new ADR)
 
-- Regression protection for newly introduced features
-- Confidence dynamics and rolling signal behaviour
-- Performance and scalability characteristics
+**Medium / Low priority**
 
-- **Low: Implement CI workflow**  
-  Add a GitHub Actions pipeline (pytest on push/PR, formatting, linting, coverage).
-  CI must not introduce behavioral dependencies (e.g. network calls or external APIs).  
-  *(No additional deterministic tests are required for v0.1.x; the existing suite
-  is complete.)*
-
----
-
-## Documentation
-
-- **Medium: Add usage guide for policy modes**  
-  Expand `docs/eck-policy-modes.md` with examples of dynamic switching (e.g. based
-  on drift) and the resulting impacts on execution breadth and confidence.
-
-- **Low: Consolidate confidence documentation**  
-  Merge scattered confidence-related files into a single coherent guide,
-  cross-referencing asymmetry and EWMA semantics in
-  `docs/appendix/eck-confidence-failure-asymmetry.md`.
-
-- **Low: Add CONTRIBUTING.md issue templates**  
-  Provide templates for bug reports, feature proposals, and documentation changes.
+- Add CONTRIBUTING.md issue templates and clearer contribution guidelines  
+- Consider optional performance optimisations (only after v0.2.0 is stable)  
+- Further formal verification experiments (TLA⁺ / model checking of the kernel)
 
 ---
 
-## Miscellaneous / Refinements
+All v0.2.0 design work is now tracked via the Architecture Decision Records in `docs/adr/`.
 
-- **Low: Add optional dependencies for advanced features**  
-  Introduce an `embeddings` extra in `pyproject.toml`
-  (e.g. `sentence-transformers`), while keeping the core strictly stdlib-only.
-
-- **Low: Benchmark and optimize queue/performance**  
-  Evaluate `TaskQueue` behaviour at large `max_size` values and add performance
-  tests if scaling becomes relevant.
-
----
-
-Contributions are welcome; please see `CONTRIBUTING.md` for invariants, scope,
-and contribution guidelines.
+Contributions are welcome, but must respect the locked invariants in ADR-020–ADR-037.  
+See `ARCHITECTURE.md` and `docs/adr/` for the current design baseline.
