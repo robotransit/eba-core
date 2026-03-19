@@ -76,6 +76,14 @@ ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architec
 - [ADR-024 — Minimal Input Signal Set for Confidence Update](docs/adr/ADR-024.md)
 - [ADR-025 — Confidence Update Mechanics (EWMA)](docs/adr/ADR-025.md)
 
+  #### Confidence Signal Processor (PR1 Implementation)
+
+  The ECK confidence system is a deterministic, non-authoritative epistemic signal processor with strict kernel-enforced invariants (ADR-021–025).
+
+  See the formal specification for full invariants and system model:
+
+  → [docs/confidence-signal-formal.md](docs/confidence-signal-formal.md)
+
 **Memory Integration**
 - [ADR-026 — Retrieval Semantics & Contract](docs/adr/ADR-026.md)
 - [ADR-027 — Enable/Disable Semantics for Memory Retrieval](docs/adr/ADR-027.md)
