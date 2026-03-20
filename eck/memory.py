@@ -6,8 +6,12 @@ from typing import NamedTuple, Optional, Tuple
 
 
 class TaskRecord(NamedTuple):
-    """Immutable record from the append-only WorldModel (placeholder)."""
-    pass  # Fields TBD in later PRs
+    """Concrete immutable record for mock WorldModel-backed retrieval (provisional)."""
+    task_id: int                  # Unique identifier
+    description: str              # User or system description
+    created_at: datetime          # Fixed timestamp of creation
+    completed: bool = False       # Completion status
+    priority: int = 0             # Optional priority (higher = more important)
 
 
 class RetrievalQuery(NamedTuple):
@@ -28,16 +32,15 @@ class RetrievalIntegration(NamedTuple):
 
 
 class MemoryRetrieval:
-    """Memory Retrieval Contract (ADR-026–030) — provisional v1.
+    """Memory Retrieval Contract (ADR-026–030) — provisional v2 (increment 2).
 
-    Implements the five-phase decomposition with strict invariants:
-    - Prompt equivalence: disabled/empty → identical prompt bytes
-    - Atomic fallback: disabled → no execution, no backend access
-    - Advisory-only: retrieval output never directly alters behavior
-    - No phase leakage: each phase is semantically isolated
-    - Metadata-only logging: no TaskRecord content ever logged
-    - Deterministic proposal and integration: identical inputs yield identical outputs
-    - Exactly one log entry per attempt, even on error paths
+    This increment adds:
+    - Provisional concrete TaskRecord schema for mock backend
+    - Immutable mock backend with fixed timestamps for determinism
+    - Deterministic empty-query handling (returns empty execution)
+    - Honest deferral of non-empty integration formatting
+
+    All prior invariants remain enforced.
     """
 
     def __init__(self, enabled: bool = False) -> None:
@@ -46,13 +49,19 @@ class MemoryRetrieval:
         self._logger = logging.getLogger("eck-core")
         self._run_id = 0
 
+        # Immutable mock world model (fixed timestamps for determinism)
+        self._mock_world_model: Tuple[TaskRecord, ...] = (
+            TaskRecord(task_id=1, description="Complete project report", created_at=datetime(2025, 1, 1, 10, 0), completed=False, priority=5),
+            TaskRecord(task_id=2, description="Review code changes", created_at=datetime(2025, 1, 2, 14, 30), completed=True, priority=3),
+            TaskRecord(task_id=3, description="Schedule meeting with team", created_at=datetime(2025, 1, 3, 9, 15), completed=False, priority=7),
+        )
+
     def build_retrieval_query(self, user_input: str) -> RetrievalQuery:
         """Phase 1: Deterministic query proposal (always runs).
 
         Identical user_input must produce identical RetrievalQuery.text.
         """
-        # Placeholder — real implementation must be deterministic
-        return RetrievalQuery(text=user_input)
+        return RetrievalQuery(text=user_input.strip().lower())
 
     def retrieval_permitted(self) -> bool:
         """Phase 2: Hard permission gate."""
@@ -61,23 +70,32 @@ class MemoryRetrieval:
     def _run_retrieval(self, query: RetrievalQuery) -> RetrievalExecution:
         """Phase 3: Retrieve items (internal — only called when permitted).
 
-        Execution must be side-effect free and must not mutate any persistent state.
+        Execution is side-effect free and read-only.
+        Empty query returns empty execution (explicitly defined).
         """
-        # Real backend access would go here (e.g., vector search, index)
-        # For now: return empty or mock data
-        return RetrievalExecution(items=())  # placeholder
+        if not self.retrieval_permitted():
+            raise RuntimeError("retrieval_permitted() must be checked before calling _run_retrieval")
+
+        if not query.text:
+            return RetrievalExecution(items=())  # explicit empty-query handling
+
+        # Deterministic filtering: preserve append-only order
+        matched = [
+            record for record in self._mock_world_model
+            if query.text in record.description.lower()
+        ]
+        return RetrievalExecution(items=tuple(matched))
 
     def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
         """Phase 4: Produce canonical prompt block (or None if disabled/empty).
 
-        Integration must be deterministic: identical RetrievalExecution inputs must produce identical RetrievalIntegration outputs.
-        When None is returned or execution is empty, no memory section or placeholder may be inserted into the prompt.
+        Integration must be deterministic: identical RetrievalExecution inputs must produce identical outputs.
+        When None is returned or execution is empty, no memory section or placeholder may be inserted.
         """
         if execution is None or not execution.items:
             return None
 
-        # Real canonical formatting would go here (deterministic)
-        # Placeholder implementation is deferred — raise until locked format is defined
+        # Real canonical formatting is deferred — raise until locked
         raise NotImplementedError("Canonical non-empty retrieval integration format not yet implemented.")
 
     def log_observability(self, enabled: bool, item_count: int, context_length: int) -> None:
