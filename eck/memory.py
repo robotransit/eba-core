@@ -1,184 +1,132 @@
+from __future__ import annotations
+
+import logging
 from datetime import datetime
-from typing import Dict, Optional, Any, List
-
-from .task import TaskState
-from .utils import score_memory_entry
-from .config import PolicyMode, ECKConfig
+from typing import NamedTuple, Optional, Tuple
 
 
-class WorldModel:
+class TaskRecord(NamedTuple):
+    """Immutable record from the append-only WorldModel (placeholder)."""
+    pass  # Fields TBD in later PRs
+
+
+class RetrievalQuery(NamedTuple):
+    """Deterministic query proposal (phase 1)."""
+    text: str
+
+
+class RetrievalExecution(NamedTuple):
+    """Immutable retrieved items (phase 3)."""
+    items: Tuple[TaskRecord, ...]
+
+
+class RetrievalIntegration(NamedTuple):
+    """Canonical prompt block (phase 4)."""
+    formatted_block: str
+    item_count: int
+    context_length: int
+
+
+class MemoryRetrieval:
+    """Memory Retrieval Contract (ADR-026–030) — provisional v1.
+
+    Implements the five-phase decomposition with strict invariants:
+    - Prompt equivalence: disabled/empty → identical prompt bytes
+    - Atomic fallback: disabled → no execution, no backend access
+    - Advisory-only: retrieval output never directly alters behavior
+    - No phase leakage: each phase is semantically isolated
+    - Metadata-only logging: no TaskRecord content ever logged
+    - Deterministic proposal and integration: identical inputs yield identical outputs
+    - Exactly one log entry per attempt, even on error paths
     """
-    Minimal in-memory store for task history — no vector DB required yet.
 
-    Maps task_id to a dict of task details (text, prediction, outcome, etc.).
-    Note: Records latest state only (overwrites previous entry for the same task_id).
-    """
+    def __init__(self, enabled: bool = False) -> None:
+        """Initialize with retrieval toggle (default disabled)."""
+        self._enabled = enabled
+        self._logger = logging.getLogger("eck-core")
+        self._run_id = 0
 
-    def __init__(self):
-        self.tasks: Dict[str, Dict[str, Any]] = {}
+    def build_retrieval_query(self, user_input: str) -> RetrievalQuery:
+        """Phase 1: Deterministic query proposal (always runs).
 
-    def record(
-        self,
-        task_id: str,
-        task_text: str,
-        prediction: str,
-        outcome: str,
-        success: bool,
-        feedback: str,
-        state: TaskState = TaskState.CREATED,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        Identical user_input must produce identical RetrievalQuery.text.
         """
-        Record a task’s execution data.
+        # Placeholder — real implementation must be deterministic
+        return RetrievalQuery(text=user_input)
 
-        All core fields are stored as provided; pass None for unknown values.
-        Optional metadata may be supplied for provenance or annotations.
-        Optional state records the task's lifecycle position.
+    def retrieval_permitted(self) -> bool:
+        """Phase 2: Hard permission gate."""
+        return self._enabled
+
+    def _run_retrieval(self, query: RetrievalQuery) -> RetrievalExecution:
+        """Phase 3: Retrieve items (internal — only called when permitted).
+
+        Execution must be side-effect free and must not mutate any persistent state.
         """
-        entry = {
-            "task": task_text,
-            "state": state.value,  # "created", "predicted", etc.
-            "prediction": prediction,
-            "outcome": outcome,
-            "success": success,
-            "feedback": feedback,
-            "timestamp": datetime.utcnow(),  # Store datetime object (serialize at boundaries)
-        }
+        # Real backend access would go here (e.g., vector search, index)
+        # For now: return empty or mock data
+        return RetrievalExecution(items=())  # placeholder
 
-        if metadata is not None:
-            if not isinstance(metadata, dict):
-                raise TypeError("metadata must be a dict if provided")
-            entry["metadata"] = dict(metadata)  # shallow copy
+    def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
+        """Phase 4: Produce canonical prompt block (or None if disabled/empty).
 
-        self.tasks[task_id] = entry
-
-    def get(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve data for a specific task by ID, or None if not found."""
-        entry = self.tasks.get(task_id)
-        if entry is not None:
-            entry = dict(entry)
-            entry["timestamp"] = entry["timestamp"].isoformat()
-        return entry
-
-    def get_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Return the most recent tasks (sorted by timestamp descending)."""
-        sorted_tasks = sorted(
-            self.tasks.values(),
-            key=lambda e: e["timestamp"],
-            reverse=True
-        )
-        recent = sorted_tasks[:limit]
-        return [dict(t, timestamp=t["timestamp"].isoformat()) for t in recent]
-
-    def get_similar(
-        self,
-        task_text: str,
-        threshold: float = 0.7,
-        limit: int = 5,
-    ) -> List[Dict[str, Any]]:
+        Integration must be deterministic: identical RetrievalExecution inputs must produce identical RetrievalIntegration outputs.
+        When None is returned or execution is empty, no memory section or placeholder may be inserted into the prompt.
         """
-        Return tasks with similarity above threshold to the given task_text.
+        if execution is None or not execution.items:
+            return None
 
-        Placeholder similarity function (string overlap) — future: use real cosine sim on embeddings.
+        # Real canonical formatting would go here (deterministic)
+        # Placeholder implementation is deferred — raise until locked format is defined
+        raise NotImplementedError("Canonical non-empty retrieval integration format not yet implemented.")
+
+    def log_observability(self, enabled: bool, item_count: int, context_length: int) -> None:
+        """Phase 5: Exactly one structured metadata log entry per attempt.
+
+        An “attempt” corresponds to a single invocation of the retrieval pipeline per agent cycle.
+        A stable identifier field (run_id) is always present.
         """
-        similar = []
-        for entry in self.tasks.values():
-            past_text = entry.get("task", "")  # Safe default if key missing
-            union = set(task_text.split()) | set(past_text.split())
-            if not union:
-                continue  # Avoid division by zero
-            intersection = set(task_text.split()) & set(past_text.split())
-            sim = len(intersection) / len(union)
-            if sim >= threshold:
-                similar.append(entry)
+        self._run_id += 1
+        self._logger.info("memory.retrieval", extra={
+            "run_id": self._run_id,
+            "timestamp": datetime.now().isoformat(),
+            "enabled": enabled,
+            "item_count": item_count,
+            "context_length": context_length,
+            "event_type": "retrieval_attempt"
+        })
 
-        similar.sort(key=lambda e: e["timestamp"], reverse=True)
-        recent = similar[:limit]
-        return [dict(t, timestamp=t["timestamp"].isoformat()) for t in recent]
+    def retrieve(self, user_input: str) -> Optional[RetrievalIntegration]:
+        """Public entrypoint: full five-phase contract in one call.
 
-    def retrieve_similar(
-        self,
-        task_text: str,
-        *,
-        threshold: float = 0.7,
-        limit: int = 5,
-        prefer_failures: bool = False,
-    ) -> List[Dict[str, Any]]:
+        Proposal always occurs.
+        Permission check decides execution.
+        If disabled: no execution, None integration, one log entry.
+        If enabled: execution (possibly empty), integration, one log entry.
+        Logging occurs exactly once per attempt, even if execution or integration raises.
         """
-        Retrieve past tasks relevant to the current task_text.
+        query = self.build_retrieval_query(user_input)
 
-        Optionally bias toward failed outcomes (negative memory).
-        Deterministic ordering: failures first (when prefer_failures=True), then recency.
+        if not self.retrieval_permitted():
+            self.log_observability(enabled=False, item_count=0, context_length=0)
+            return None
 
-        Not used anywhere yet — future consumer for prediction context.
-        """
-        candidates = self.get_similar(
-            task_text,
-            threshold=threshold,
-            limit=limit * 2,  # Fetch extra for filtering/bias — future: configurable
-        )
-
-        if prefer_failures:
-            failed = [e for e in candidates if not e.get("success", False)]
-            succeeded = [e for e in candidates if e.get("success", False)]
-            prioritized = failed + succeeded
-        else:
-            prioritized = candidates
-
-        return prioritized[:limit]  # No re-serialization — upstream already handles it
-
-    def retrieve_scored(
-        self,
-        task_text: str,
-        policy_mode: PolicyMode,
-        config: ECKConfig,
-        *,
-        threshold: float = 0.7,
-        limit: int = 5,
-        prefer_failures: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve past tasks relevant to the current task_text with computed scores.
-
-        Scores are computed using score_memory_entry() and used for ranking.
-        Drops entries with score == 0.
-        Deterministic ordering: score DESC.
-
-        Not used anywhere yet — future consumer for prediction context.
-        """
-        candidates = self.retrieve_similar(
-            task_text=task_text,
-            threshold=threshold,
-            limit=limit * 2,
-            prefer_failures=prefer_failures,
-        )
-
-        scored = []
-        for entry in candidates:
-            score = score_memory_entry(
-                entry=entry,
-                current_task=task_text,
-                policy_mode=policy_mode,
-                config=config,
+        # Enabled path — logging must occur exactly once per attempt
+        item_count = 0
+        context_length = 0
+        integration = None
+        try:
+            execution = self._run_retrieval(query)
+            item_count = len(execution.items) if execution else 0
+            integration = self.integrate_retrieval(execution)
+            context_length = integration.context_length if integration else 0
+        finally:
+            # Logging belongs in finally to preserve the exactly-once observability invariant
+            # for both success and failure paths on enabled retrieval attempts
+            self.log_observability(
+                enabled=True,
+                item_count=item_count,
+                context_length=context_length
             )
-            if score > 0:
-                entry_with_score = dict(entry)
-                entry_with_score["score"] = score
-                scored.append(entry_with_score)
 
-        scored.sort(key=lambda e: e["score"], reverse=True)
-        return scored[:limit]
-
-    def all_tasks(self) -> Dict[str, Dict[str, Any]]:
-        """Return a copy of the entire task history with serialized timestamps."""
-        return {
-            k: dict(v, timestamp=v["timestamp"].isoformat())
-            for k, v in self.tasks.items()
-        }
-
-    def __len__(self) -> int:
-        """Number of recorded tasks."""
-        return len(self.tasks)
-
-    def __repr__(self) -> str:
-        return f"WorldModel({len(self)} tasks recorded)"
+        return integration
