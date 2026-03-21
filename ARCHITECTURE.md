@@ -7,9 +7,9 @@ The Epistemic Control Kernel (ECK) follows a **microkernel-style architecture** 
 The design prioritizes:
 - Strict control over authority surfaces
 - Deterministic and testable core behavior
-- Explicit policy mediation for all behavioral effects
+- Explicit policy gate for all behavioral effects
 
-Core agent behavior must remain stable and predictable **regardless of optional capability layers**. Capability features (memory retrieval, similarity scoring, prompt scaffolding, etc.) must remain **advisory-only** and never alter core semantics unless explicitly mediated by policy.
+Core agent behavior must remain stable and predictable **regardless of optional capability layers**. Capability features (memory retrieval, similarity scoring, prompt scaffolding, etc.) must remain **advisory-only** and never alter core semantics unless explicitly mediated by the policy gate.
 
 All significant architectural decisions are recorded in the [Architecture Decision Records (ADRs)](./docs/adr/).
 
@@ -20,11 +20,11 @@ At runtime, the ECK executes a deterministic agent loop in which:
 1. Tasks or actions are proposed or generated.
 2. A critic evaluates outcomes or intermediate results.
 3. Epistemic signals (such as confidence) are updated according to explicit rules.
-4. Policy logic interprets signals and determines the next permitted execution mode or action.
+4. The policy gate evaluates proposed actions against epistemic state and determines the next permitted execution mode or action before execution occurs.
 
 The kernel operates as a compact, policy-mediated state machine whose state transitions are driven exclusively by deterministic rules and critic-derived signals, never directly by LLM reasoning or capability-layer outputs.
 
-All behavioral influence flows through explicit policy mediation. External signals such as memory retrieval, similarity scores, or prompt scaffolding may provide contextual information but cannot directly alter execution.
+All behavioral influence flows through explicit policy gate mediation. External signals such as memory retrieval, similarity scores, or prompt scaffolding may provide contextual information but cannot directly alter execution.
 
 This model ensures that cognition-like capabilities remain advisory while the kernel retains full authority over behavior.
 
@@ -36,8 +36,8 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 - **Advisory Memory & Cognition**  
   Memory retrieval, critic feedback, similarity scoring, and prompts provide contextual information only. They must never become authority surfaces or directly control behavior.
 
-- **Explicit Policy Mediation**  
-  All signals (confidence, memory context, similarity scores, etc.) must be mediated by explicit policy logic before affecting execution, mode transitions, or gating.
+- **Explicit Policy Gate**  
+  All signals must be mediated by explicit policy gate logic before affecting execution, mode transitions, or gating, with confidence acting as the primary control signal consumed exclusively by the policy gate.
 
 - **Optional Capability Layers**  
   Advanced features must remain optional (via toggles or extras) and must not introduce mandatory dependencies, runtime coupling, or non-determinism into the core.
@@ -45,7 +45,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 ## Safety Boundaries ("Must Never Happen")
 
 - No new authority surfaces through memory, prompts, similarity, or other capability layers  
-- No silent coupling: signals must not alter behavior without explicit policy mediation  
+- No silent coupling: signals must not alter behavior without explicit policy gate mediation  
 - No dependency creep: the core package must remain stdlib-only  
 - No prompt drift when retrieval is disabled (bit-for-bit prompt identity)  
 - No split-brain state: new state variables must have a single source of truth and deterministic tests
@@ -57,6 +57,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 - Policy mode behavior
 - Deterministic execution
 - Stdlib-only operation
+- Policy Gate contract and default control mediation
 
 **Optional** (behind explicit toggles or extras):
 - Embedding-based similarity
@@ -65,7 +66,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 
 ## v0.2.0 Architecture Sequence
 
-The v0.2.0 architecture is defined through the ADR set ADR-020 through ADR-037.
+The v0.2.0 architecture is defined through the ADR set ADR-020 through ADR-038.
 
 ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architecture. The subsequent ADRs are grouped by subsystem for readability.
 
@@ -76,13 +77,24 @@ ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architec
 - [ADR-024 — Minimal Input Signal Set for Confidence Update](docs/adr/ADR-024.md)
 - [ADR-025 — Confidence Update Mechanics (EWMA)](docs/adr/ADR-025.md)
 
-  #### Confidence Signal Processor (PR1 Implementation)
+#### Confidence Signal Processor (PR1 Implementation)
 
-  The ECK confidence system is a deterministic, non-authoritative epistemic signal processor with strict kernel-enforced invariants (ADR-021–025).
+The ECK confidence system is a deterministic, non-authoritative epistemic signal processor with strict kernel-enforced invariants (ADR-021–025).
 
-  See the formal specification for full invariants and system model:
+See the formal specification for full invariants and system model:
 
-  → [docs/confidence-signal-formal.md](docs/confidence-signal-formal.md)
+→ [docs/confidence-signal-formal.md](docs/confidence-signal-formal.md)
+
+**Policy Gate**
+- [ADR-038 — Policy Gate Contract – Exclusive Consumer of Epistemic Signals](docs/adr/ADR-038.md)
+
+#### Policy Gate (New Subsystem)
+
+The policy gate is the exclusive consumer of confidence for control decisions and the sole pre-execution mediation layer between epistemic state and execution. It enforces strict invariants including purity, determinism, side-effect freedom, monotonicity, and explicit default semantics. The policy gate is a pure, referentially transparent function of (proposed_action, confidence, context).
+
+See the ADR for full contract details and invariants:
+
+→ [docs/adr/ADR-038.md](docs/adr/ADR-038.md)
 
 **Memory Integration**
 - [ADR-026 — Retrieval Semantics & Contract](docs/adr/ADR-026.md)
