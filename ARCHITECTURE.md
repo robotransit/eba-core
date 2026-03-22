@@ -20,7 +20,10 @@ At runtime, the ECK executes a deterministic agent loop in which:
 1. Tasks or actions are proposed or generated.
 2. A critic evaluates outcomes or intermediate results.
 3. Epistemic signals (such as confidence) are updated according to explicit rules.
-4. The policy gate evaluates proposed actions against epistemic state and determines the next permitted execution mode or action before execution occurs.
+4. The policy gate evaluates proposed actions against epistemic state and returns an execution mode.
+5. The agent loop enforces that decision before any execution occurs.
+
+This establishes a strict separation between decision (policy gate) and enforcement (agent loop).
 
 The kernel operates as a compact, policy-mediated state machine whose state transitions are driven exclusively by deterministic rules and critic-derived signals, never directly by LLM reasoning or capability-layer outputs.
 
@@ -37,7 +40,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
   Memory retrieval, critic feedback, similarity scoring, and prompts provide contextual information only. They must never become authority surfaces or directly control behavior.
 
 - **Explicit Policy Gate**  
-  All signals must be mediated by explicit policy gate logic before affecting execution, mode transitions, or gating, with confidence acting as the primary control signal consumed exclusively by the policy gate.
+  All signals must be mediated by explicit policy gate logic before affecting execution, mode transitions, or gating, with confidence acting as the primary control signal consumed exclusively by the policy gate. All resulting control decisions must be enforced by the agent loop before execution.
 
 - **Optional Capability Layers**  
   Advanced features must remain optional (via toggles or extras) and must not introduce mandatory dependencies, runtime coupling, or non-determinism into the core.
@@ -58,6 +61,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 - Deterministic execution
 - Stdlib-only operation
 - Policy Gate contract and default control mediation
+- Agent loop enforcement of policy gate decisions
 
 **Optional** (behind explicit toggles or extras):
 - Embedding-based similarity
@@ -66,7 +70,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 
 ## v0.2.0 Architecture Sequence
 
-The v0.2.0 architecture is defined through the ADR set ADR-020 through ADR-038.
+The v0.2.0 architecture is defined through the ADR set ADR-020 through ADR-039.
 
 ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architecture. The subsequent ADRs are grouped by subsystem for readability.
 
@@ -95,6 +99,18 @@ The policy gate is the exclusive consumer of confidence for control decisions an
 See the ADR for full contract details and invariants:
 
 → [docs/adr/ADR-038.md](docs/adr/ADR-038.md)
+
+**Agent Loop Enforcement**
+- [ADR-039 — Agent Loop & Policy Gate Integration](docs/adr/ADR-039.md)
+
+#### Agent Loop Enforcement (PR3 Implementation)
+
+The agent loop is the runtime enforcement seam for policy gate decisions.  
+It ensures no execution occurs without prior gate authorization and that HALT, RETRY, and DEGRADE outcomes prevent execution of the current proposal.
+
+See the ADR for full enforcement details and invariants:
+
+→ [docs/adr/ADR-039.md](docs/adr/ADR-039.md)
 
 **Memory Integration**
 - [ADR-026 — Retrieval Semantics & Contract](docs/adr/ADR-026.md)
