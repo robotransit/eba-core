@@ -1,3 +1,8 @@
+# eck/config.py
+"""Central configuration for the Epistemic Control Kernel."""
+
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
@@ -26,7 +31,7 @@ class ECKConfig:
     Consumers **must** use effective_policy(); direct access to _guided_* fields is not policy-aware.
     """
 
-    # Existing public fields (abbreviated)
+    # Public fields
     max_iterations: int = 100
     max_queue_size: int = 50
     semantic_drift_threshold: float = 0.7
@@ -51,6 +56,13 @@ class ECKConfig:
     memory_retrieval_limit: int = 5
     memory_similarity_threshold: float = 0.6
     prefer_negative_memory: bool = True  # Bias toward failed outcomes
+
+    # Optional embeddings/cosine similarity (ADR-032)
+    # Default: False (core stdlib heuristic only).
+    # When True and sentence-transformers extras are installed, model loading occurs at ECKAgent construction.
+    # If disabled, extras are missing, or load fails, behavior falls back silently to the core path.
+    enable_embeddings: bool = False
+
 
     def effective_policy(self) -> Mapping[str, object]:
         """
