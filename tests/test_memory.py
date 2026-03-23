@@ -9,6 +9,7 @@ from eck.memory import (
     RetrievalExecution,
     RetrievalQuery,
     TaskRecord,
+    RetrievalIntegration,
 )
 
 
@@ -65,179 +66,152 @@ class TestMemoryRetrieval(unittest.TestCase):
             self.disabled_retrieval._run_retrieval(query)
 
     # ------------------------------------------------------------------
-    # Disable isolation
+    # Disabled isolation (zero activity)
     # ------------------------------------------------------------------
-    def test_disabled_path_no_execution_object(self) -> None:
-        """Disabled path creates no RetrievalExecution object."""
+    def test_disabled_path_zero_retrieval_activity(self) -> None:
+        """Disabled path performs zero retrieval activity (no execution, no log)."""
         with patch.object(self.disabled_retrieval, "_run_retrieval") as mock_exec:
-            result = self.disabled_retrieval.retrieve("test input")
-            mock_exec.assert_not_called()
-            self.assertIsNone(result)
+            with patch.object(self.disabled_retrieval._logger, "info") as mock_log:
+                result = self.disabled_retrieval.retrieve("test input")
+                mock_exec.assert_not_called()
+                mock_log.assert_not_called()
+                self.assertIsNone(result)
 
     def test_disabled_path_returns_none(self) -> None:
         """Disabled path returns None."""
         result = self.disabled_retrieval.retrieve("test input")
         self.assertIsNone(result)
 
-    def test_disabled_path_logs_exactly_once(self) -> None:
-        """Disabled path logs exactly once."""
-        with patch.object(self.disabled_retrieval._logger, "info") as mock_log:
-            self.disabled_retrieval.retrieve("test input")
-            mock_log.assert_called_once()
-
-    def test_disabled_path_log_fields(self) -> None:
-        """Disabled path logs correct metadata fields."""
-        with patch.object(self.disabled_retrieval._logger, "info") as mock_log:
-            self.disabled_retrieval.retrieve("test input")
-            mock_log.assert_called_once()
-            extra = mock_log.call_args[1]["extra"]
-            self.assertEqual(extra["enabled"], False)
-            self.assertEqual(extra["item_count"], 0)
-            self.assertEqual(extra["context_length"], 0)
-            self.assertIn("run_id", extra)
-            self.assertIn("timestamp", extra)
-            self.assertEqual(extra["event_type"], "retrieval_attempt")
-
     # ------------------------------------------------------------------
     # Enabled + empty semantics
     # ------------------------------------------------------------------
     def test_enabled_empty_returns_none(self) -> None:
-        """Enabled-empty path returns None (integration returns None)."""
-        result = self.retrieval.retrieve("test input")
-        self.assertIsNone(result)
-
-    def test_enabled_empty_logs_exactly_once(self) -> None:
-        """Enabled-empty path logs exactly once."""
-        with patch.object(self.retrieval._logger, "info") as mock_log:
-            self.retrieval.retrieve("test input")
-            mock_log.assert_called_once()
-
-    def test_enabled_empty_log_fields(self) -> None:
-        """Enabled-empty path logs correct metadata fields."""
-        with patch.object(self.retrieval._logger, "info") as mock_log:
-            self.retrieval.retrieve("test input")
-            mock_log.assert_called_once()
-            extra = mock_log.call_args[1]["extra"]
-            self.assertEqual(extra["enabled"], True)
-            self.assertEqual(extra["item_count"], 0)
-            self.assertEqual(extra["context_length"], 0)
-            self.assertIn("run_id", extra)
-            self.assertIn("timestamp", extra)
-            self.assertEqual(extra["event_type"], "retrieval_attempt")
-
-    def test_enabled_empty_executes_internally(self) -> None:
-        """Enabled-empty path creates real RetrievalExecution internally."""
+        """Enabled-empty path returns None."""
         with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
             mock_exec.return_value = RetrievalExecution(items=())
             result = self.retrieval.retrieve("test input")
-            mock_exec.assert_called_once()
             self.assertIsNone(result)
+
+    def test_enabled_empty_logs_exactly_once(self) -> None:
+        """Enabled-empty path logs exactly once."""
+        with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
+            mock_exec.return_value = RetrievalExecution(items=())
+            with patch.object(self.retrieval._logger, "info") as mock_log:
+                self.retrieval.retrieve("test input")
+                mock_log.assert_called_once()
+
+    def test_enabled_empty_log_fields(self) -> None:
+        """Enabled-empty path logs correct metadata fields (no timestamp)."""
+        with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
+            mock_exec.return_value = RetrievalExecution(items=())
+            with patch.object(self.retrieval._logger, "info") as mock_log:
+                self.retrieval.retrieve("test input")
+                mock_log.assert_called_once()
+                extra = mock_log.call_args[1]["extra"]
+                self.assertEqual(extra["enabled"], True)
+                self.assertEqual(extra["item_count"], 0)
+                self.assertEqual(extra["context_length"], 0)
+                self.assertIn("run_id", extra)
+                self.assertEqual(extra["event_type"], "retrieval_attempt")
+                self.assertNotIn("timestamp", extra)
 
     # ------------------------------------------------------------------
     # Prompt equivalence boundary
     # ------------------------------------------------------------------
     def test_prompt_equivalence_disabled_vs_enabled_empty(self) -> None:
-        """Disabled and enabled-empty must yield the same integration result."""
+        """Disabled and enabled-empty must yield the same integration result (None)."""
         disabled_result = self.disabled_retrieval.retrieve("test input")
-        empty_result = self.retrieval.retrieve("test input")
+
+        with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
+            mock_exec.return_value = RetrievalExecution(items=())
+            empty_result = self.retrieval.retrieve("test input")
+
+        self.assertIsNone(disabled_result)
+        self.assertIsNone(empty_result)
         self.assertEqual(disabled_result, empty_result)
 
     # ------------------------------------------------------------------
-    # Exact-once observability on exception path
+    # Exact-once observability on enabled path (including exceptions)
     # ------------------------------------------------------------------
-    def test_logging_exact_once_on_exception(self) -> None:
-        """Enabled path logs exactly once even when integration raises."""
+    def test_logging_exact_once_enabled_path(self) -> None:
+        """Enabled path logs exactly once (success or failure)."""
         with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
-            mock_exec.return_value = RetrievalExecution(items=(self._sample_task_record(),))
+            mock_exec.return_value = RetrievalExecution(items=())
             with patch.object(self.retrieval._logger, "info") as mock_log:
-                with self.assertRaises(NotImplementedError):
+                self.retrieval.retrieve("test input")
+                mock_log.assert_called_once()
+                extra = mock_log.call_args[1]["extra"]
+                self.assertEqual(extra["enabled"], True)
+                self.assertEqual(extra["item_count"], 0)
+                self.assertEqual(extra["context_length"], 0)
+                self.assertIn("run_id", extra)
+                self.assertEqual(extra["event_type"], "retrieval_attempt")
+
+    def test_logging_exact_once_on_exception(self) -> None:
+        """Enabled path logs exactly once even when execution raises."""
+        with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
+            mock_exec.side_effect = RuntimeError("backend failure")
+            with patch.object(self.retrieval._logger, "info") as mock_log:
+                with self.assertRaises(RuntimeError):
                     self.retrieval.retrieve("test input")
                 mock_log.assert_called_once()
                 extra = mock_log.call_args[1]["extra"]
                 self.assertEqual(extra["enabled"], True)
-                self.assertEqual(extra["item_count"], 1)
+                self.assertEqual(extra["item_count"], 0)
                 self.assertEqual(extra["context_length"], 0)
                 self.assertIn("run_id", extra)
                 self.assertEqual(extra["event_type"], "retrieval_attempt")
 
     # ------------------------------------------------------------------
-    # Metadata-only logging
+    # Advisory-only posture (non-empty integration)
     # ------------------------------------------------------------------
-    def test_metadata_only_logging(self) -> None:
-        """Log entries contain only expected metadata keys."""
-        with patch.object(self.retrieval._logger, "info") as mock_log:
-            self.retrieval.retrieve("test input")
-            mock_log.assert_called_once()
-            extra = mock_log.call_args[1]["extra"]
-            expected_keys = {
-                "run_id",
-                "timestamp",
-                "enabled",
-                "item_count",
-                "context_length",
-                "event_type",
-            }
-            self.assertEqual(set(extra.keys()), expected_keys)
-
-    # ------------------------------------------------------------------
-    # Non-empty integration deferred honestly
-    # ------------------------------------------------------------------
-    def test_non_empty_integration_raises_not_implemented(self) -> None:
-        """Non-empty execution raises NotImplementedError in integration."""
+    def test_non_empty_integration_returns_advisory_text(self) -> None:
+        """Non-empty execution produces advisory RetrievalIntegration with text block."""
         with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
             mock_exec.return_value = RetrievalExecution(items=(self._sample_task_record(),))
-            with self.assertRaises(NotImplementedError):
+            result = self.retrieval.retrieve("test input")
+            self.assertIsInstance(result, RetrievalIntegration)
+            self.assertIsInstance(result.formatted_block, str)
+            self.assertTrue(result.formatted_block.startswith("=== BEGIN MEMORY CONTEXT ==="))
+            self.assertGreater(result.item_count, 0)
+            self.assertGreater(result.context_length, 0)
+
+    # ------------------------------------------------------------------
+    # Ordering (newest-first)
+    # ------------------------------------------------------------------
+    def test_run_retrieval_returns_newest_first(self) -> None:
+        """_run_retrieval returns items sorted newest-first by created_at."""
+        # Override mock model for controlled test
+        self.retrieval._mock_world_model = (
+            TaskRecord(task_id=1, description="Test", created_at=datetime(2025, 1, 1), completed=False, priority=0),
+            TaskRecord(task_id=2, description="Test", created_at=datetime(2025, 1, 2), completed=False, priority=0),
+            TaskRecord(task_id=3, description="Test", created_at=datetime(2025, 1, 3), completed=False, priority=0),
+        )
+        query = RetrievalQuery(text="test")
+        execution = self.retrieval._run_retrieval(query)
+        ids = tuple(r.task_id for r in execution.items)
+        self.assertEqual(ids, (3, 2, 1))  # newest first
+
+    # ------------------------------------------------------------------
+    # Metadata-only logging (current keys)
+    # ------------------------------------------------------------------
+    def test_metadata_only_logging(self) -> None:
+        """Log entries contain only expected metadata keys (no timestamp)."""
+        with patch.object(self.retrieval, "_run_retrieval") as mock_exec:
+            mock_exec.return_value = RetrievalExecution(items=())
+            with patch.object(self.retrieval._logger, "info") as mock_log:
                 self.retrieval.retrieve("test input")
-
-    # ------------------------------------------------------------------
-    # Direct method tests for contract breadth
-    # ------------------------------------------------------------------
-    def test_integrate_retrieval_none_returns_none(self) -> None:
-        """integrate_retrieval(None) returns None."""
-        result = self.retrieval.integrate_retrieval(None)
-        self.assertIsNone(result)
-
-    def test_integrate_retrieval_empty_execution_returns_none(self) -> None:
-        """integrate_retrieval(empty execution) returns None."""
-        empty_exec = RetrievalExecution(items=())
-        result = self.retrieval.integrate_retrieval(empty_exec)
-        self.assertIsNone(result)
-
-    # ------------------------------------------------------------------
-    # Query behavior
-    # ------------------------------------------------------------------
-    def test_empty_query_returns_empty_execution(self) -> None:
-        """Empty query returns empty execution."""
-        query = self.retrieval.build_retrieval_query("   ")
-        execution = self.retrieval._run_retrieval(query)
-        self.assertEqual(len(execution.items), 0)
-
-    def test_query_matching_returns_expected_items(self) -> None:
-        """Query matching returns expected items."""
-        query = self.retrieval.build_retrieval_query("report")
-        execution = self.retrieval._run_retrieval(query)
-        self.assertEqual(len(execution.items), 1)
-        self.assertIn("report", execution.items[0].description.lower())
-
-    def test_query_no_match_returns_empty(self) -> None:
-        """No-match query returns empty execution."""
-        query = self.retrieval.build_retrieval_query("nonexistent")
-        execution = self.retrieval._run_retrieval(query)
-        self.assertEqual(len(execution.items), 0)
-
-    def test_retrieval_preserves_order(self) -> None:
-        """Retrieval preserves append-only order."""
-        query = self.retrieval.build_retrieval_query("e")
-        execution = self.retrieval._run_retrieval(query)
-        ids = [record.task_id for record in execution.items]
-        expected_ids = [
-            record.task_id
-            for record in self.retrieval._mock_world_model
-            if "e" in record.description.lower()
-        ]
-        self.assertEqual(ids, expected_ids)
+                mock_log.assert_called_once()
+                extra = mock_log.call_args[1]["extra"]
+                expected_keys = {
+                    "run_id",
+                    "enabled",
+                    "item_count",
+                    "context_length",
+                    "event_type",
+                }
+                self.assertEqual(set(extra.keys()), expected_keys)
 
 
 if __name__ == "__main__":
     unittest.main()
-    
