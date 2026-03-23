@@ -1,8 +1,14 @@
+# eck/memory.py
+"""Memory Retrieval subsystem (ADRs 026–030)."""
+
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import NamedTuple, Optional, Tuple
+from datetime import datetime, timezone
+from typing import NamedTuple, Optional, Sequence, Tuple
+
+
+logger = logging.getLogger("eck-core")
 
 
 class TaskRecord(NamedTuple):
@@ -36,11 +42,9 @@ class MemoryRetrieval:
 
     This increment adds:
     - Provisional concrete TaskRecord schema for mock backend
-    - Immutable mock backend with fixed timestamps for determinism
+    - Immutable mock world model with fixed timestamps for determinism
     - Deterministic empty-query handling (returns empty execution)
-    - Honest deferral of non-empty integration formatting
-
-    All prior invariants remain enforced.
+    - Canonical formatting per locked PR4 contract
     """
 
     def __init__(self, enabled: bool = False) -> None:
@@ -57,10 +61,7 @@ class MemoryRetrieval:
         )
 
     def build_retrieval_query(self, user_input: str) -> RetrievalQuery:
-        """Phase 1: Deterministic query proposal (always runs).
-
-        Identical user_input must produce identical RetrievalQuery.text.
-        """
+        """Phase 1: Deterministic query proposal (always runs)."""
         return RetrievalQuery(text=user_input.strip().lower())
 
     def retrieval_permitted(self) -> bool:
@@ -72,6 +73,7 @@ class MemoryRetrieval:
 
         Execution is side-effect free and read-only.
         Empty query returns empty execution (explicitly defined).
+        Results are sorted newest-first to match the formatter header.
         """
         if not self.retrieval_permitted():
             raise RuntimeError("retrieval_permitted() must be checked before calling _run_retrieval")
@@ -79,35 +81,87 @@ class MemoryRetrieval:
         if not query.text:
             return RetrievalExecution(items=())  # explicit empty-query handling
 
-        # Deterministic filtering: preserve append-only order
+        # Deterministic filtering + explicit sort for "most recent first"
         matched = [
             record for record in self._mock_world_model
             if query.text in record.description.lower()
         ]
+        matched.sort(key=lambda r: r.created_at, reverse=True)
         return RetrievalExecution(items=tuple(matched))
 
-    def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
-        """Phase 4: Produce canonical prompt block (or None if disabled/empty).
+    def _format_timestamp(self, dt: datetime) -> str:
+        """Strict canonical YYYY-MM-DDTHH:MM:SSZ (second precision, always Z, UTC)."""
+        dt = dt.replace(microsecond=0)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        Integration must be deterministic: identical RetrievalExecution inputs must produce identical outputs.
-        When None is returned or execution is empty, no memory section or placeholder may be inserted.
+    def _normalize_field(self, value: str) -> str:
+        """Locked normalization: line endings first, then strip, then collapse to single line."""
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        value = value.strip()
+        value = value.replace("\n", " ")   # force single-line fields
+        return value
+
+    def format_memory_context(self, records: Sequence[TaskRecord]) -> str:
         """
+        Canonical deterministic formatting per locked PR4 contract.
+
+        - Empty sequence → ""
+        - Fixed sentinels + single-line fields
+        - Preserves input order exactly
+        - No trailing newline after footer
+        """
+        if not records:
+            return ""
+
+        lines: list[str] = [
+            "=== BEGIN MEMORY CONTEXT ===",
+            "Order: most recent first",
+            "",
+        ]
+
+        for i, rec in enumerate(records, start=1):
+            task_id = self._normalize_field(str(rec.task_id))
+            summary = self._normalize_field(rec.description)
+            outcome = self._normalize_field("Completed" if rec.completed else "Pending")
+            timestamp_str = self._format_timestamp(rec.created_at)
+
+            lines.extend([
+                f"Record {i}",
+                f"Task ID: {task_id}",
+                f"Timestamp: {timestamp_str}",
+                f"Summary: {summary}",
+                f"Outcome: {outcome}",
+                "",  # separator
+            ])
+
+        # Remove trailing blank line before footer
+        if lines[-1] == "":
+            lines.pop()
+
+        lines.append("=== END MEMORY CONTEXT ===")
+
+        return "\n".join(lines)
+
+    def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
+        """Phase 4: Produce canonical prompt block (or None if disabled/empty)."""
         if execution is None or not execution.items:
             return None
 
-        # Real canonical formatting is deferred — raise until locked
-        raise NotImplementedError("Canonical non-empty retrieval integration format not yet implemented.")
+        formatted = self.format_memory_context(execution.items)
+
+        return RetrievalIntegration(
+            formatted_block=formatted,
+            item_count=len(execution.items),
+            context_length=len(formatted),
+        )
 
     def log_observability(self, enabled: bool, item_count: int, context_length: int) -> None:
-        """Phase 5: Exactly one structured metadata log entry per attempt.
-
-        An “attempt” corresponds to a single invocation of the retrieval pipeline per agent cycle.
-        A stable identifier field (run_id) is always present.
-        """
+        """Phase 5: Exactly one structured metadata log entry per enabled attempt."""
         self._run_id += 1
         self._logger.info("memory.retrieval", extra={
             "run_id": self._run_id,
-            "timestamp": datetime.now().isoformat(),
             "enabled": enabled,
             "item_count": item_count,
             "context_length": context_length,
@@ -117,19 +171,15 @@ class MemoryRetrieval:
     def retrieve(self, user_input: str) -> Optional[RetrievalIntegration]:
         """Public entrypoint: full five-phase contract in one call.
 
-        Proposal always occurs.
-        Permission check decides execution.
-        If disabled: no execution, None integration, one log entry.
-        If enabled: execution (possibly empty), integration, one log entry.
-        Logging occurs exactly once per attempt, even if execution or integration raises.
+        If disabled: zero retrieval activity (no log, no execution, None integration).
+        If enabled: execution (possibly empty), integration, one deterministic log entry.
         """
         query = self.build_retrieval_query(user_input)
 
         if not self.retrieval_permitted():
-            self.log_observability(enabled=False, item_count=0, context_length=0)
-            return None
+            return None  # zero activity when disabled
 
-        # Enabled path — logging must occur exactly once per attempt
+        # Enabled path only
         item_count = 0
         context_length = 0
         integration = None
@@ -139,8 +189,6 @@ class MemoryRetrieval:
             integration = self.integrate_retrieval(execution)
             context_length = integration.context_length if integration else 0
         finally:
-            # Logging belongs in finally to preserve the exactly-once observability invariant
-            # for both success and failure paths on enabled retrieval attempts
             self.log_observability(
                 enabled=True,
                 item_count=item_count,
