@@ -41,7 +41,7 @@ ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architec
 - [ADR-031 — Similarity Retrieval API Contract](ADR-031.md)
 - [ADR-032 — Optional Embeddings + Cosine Integration](ADR-032.md)
 
-**Prompt Integration**
+**Prompts Integration**
 - [ADR-033 — Prompts Integration Cleanup & Authority Guardrails](ADR-033.md)
 
 **CI and Observability**
@@ -49,6 +49,12 @@ ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architec
 - [ADR-035 — GitHub Actions CI Workflow Implementation](ADR-035.md)
 - [ADR-036 — Test Coverage & Invariant Enforcement Metrics](ADR-036.md)
 - [ADR-037 — CI Observability & Logging](ADR-037.md)
+
+**Policy Gate**
+- [ADR-038 — Policy Gate Contract – Exclusive Consumer of Epistemic Signals](ADR-038.md)
+
+**Agent Loop Enforcement**
+- [ADR-039 — Agent Loop & Policy Gate Integration](ADR-039.md)
 
 ## Relationship to Architecture
 
