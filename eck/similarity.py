@@ -72,15 +72,40 @@ def _core_retrieve_scored(
     return result
 
 
-# ── Future optional path scaffolding (wired at ECKAgent construction in Commit 3) ──────────
+# ── Optional cosine path (to be wired from ECKAgent) ───────────────────────────────────────
 
-# Placeholder for optional cosine similarity path.
-# When enable_embeddings=True and sentence-transformers extras are available:
-#   - Load model once at ECKAgent construction
-#   - Use cosine similarity on embeddings (query_embedding or fresh embed)
-#   - Equal-score ties still resolved reverse-chronologically
-#   - Silent atomic fallback to _core_* methods on any failure (missing extras, load error, etc.)
-#   - No exception propagation, no partial state
-#   - No change to public API signatures or core path behavior
+def _optional_retrieve_similar(
+    tasks: List[TaskRecord],
+    query_embedding: Optional[Any],
+    limit: int,
+    embedding_model: Any | None,
+) -> List[TaskRecord]:
+    """
+    Private optional path: cosine similarity when model is available.
+    Falls back silently to core path if no model.
+    Equal-score ties resolved reverse-chronologically.
+    """
+    if embedding_model is None or query_embedding is None:
+        return _core_retrieve_similar(tasks, limit)
 
-# Implementation deferred to Commit 3.
+    # TODO: Implement cosine similarity using embedding_model
+    # For now: silent fallback to core
+    return _core_retrieve_similar(tasks, limit)
+
+
+def _optional_retrieve_scored(
+    tasks: List[TaskRecord],
+    query_embedding: Optional[Any],
+    limit: int,
+    embedding_model: Any | None,
+) -> List[Tuple[TaskRecord, float]]:
+    """
+    Private optional path: cosine scoring when model is available.
+    Falls back silently to core path if no model.
+    """
+    if embedding_model is None or query_embedding is None:
+        return _core_retrieve_scored(tasks, limit)
+
+    # TODO: Implement cosine scoring using embedding_model
+    # For now: silent fallback to core
+    return _core_retrieve_scored(tasks, limit)
