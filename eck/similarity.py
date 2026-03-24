@@ -3,9 +3,37 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Sequence
 
 from eck.memory import TaskRecord
+
+
+# Lazy numpy import (only when optional path is used)
+_np: Any | None = None
+_np_failed: bool = False
+
+
+def _get_np() -> Any | None:
+    """
+    Lazy import of numpy with explicit failure sentinel.
+
+    Returns the cached numpy module, or None if numpy is unavailable or
+    a prior import attempt failed.
+    """
+    global _np, _np_failed
+
+    if _np_failed:
+        return None
+
+    if _np is None:
+        try:
+            import numpy as np
+            _np = np
+        except Exception:
+            _np_failed = True
+            return None
+
+    return _np
 
 
 def retrieve_similar(
@@ -42,7 +70,7 @@ def retrieve_scored(
 # ── Core stdlib-only implementation (always used in fallback) ────────────────────────────────
 
 def _core_retrieve_similar(
-    tasks: List[TaskRecord],
+    tasks: Sequence[TaskRecord],
     limit: int,
 ) -> List[TaskRecord]:
     """Core deterministic reverse-chronological retrieval (ignores embeddings)."""
@@ -54,7 +82,7 @@ def _core_retrieve_similar(
 
 
 def _core_retrieve_scored(
-    tasks: List[TaskRecord],
+    tasks: Sequence[TaskRecord],
     limit: int,
 ) -> List[Tuple[TaskRecord, float]]:
     """Core deterministic reverse-chronological scoring (ignores embeddings)."""
@@ -72,40 +100,134 @@ def _core_retrieve_scored(
     return result
 
 
-# ── Optional cosine path (to be wired from ECKAgent) ───────────────────────────────────────
+# ── Private helper for cosine score ───────────────────────────────────────────────────────
+
+def _cosine_score(query_emb, task_emb, np) -> float:
+    """Compute cosine similarity with zero-norm guard."""
+    norm_q = np.linalg.norm(query_emb)
+    norm_t = np.linalg.norm(task_emb)
+    if norm_q == 0 or norm_t == 0:
+        return 0.0
+    return float(np.dot(query_emb, task_emb) / (norm_q * norm_t))
+
+
+# ── Optional cosine path (wired from ECKAgent) ─────────────────────────────────────
 
 def _optional_retrieve_similar(
-    tasks: List[TaskRecord],
+    tasks: Sequence[TaskRecord],
     query_embedding: Optional[Any],
     limit: int,
     embedding_model: Any | None,
 ) -> List[TaskRecord]:
     """
-    Private optional path: cosine similarity when model is available.
-    Falls back silently to core path if no model.
+    Optional path: real cosine similarity when model is available.
     Equal-score ties resolved reverse-chronologically.
+    Silent atomic fallback to core path on any failure.
+
+    Note:
+    In the current integration, query_embedding is treated as query text and
+    encoded within this function. Future revisions may pass a precomputed
+    embedding instead, but this does not affect current behavior.
     """
     if embedding_model is None or query_embedding is None:
         return _core_retrieve_similar(tasks, limit)
 
-    # TODO: Implement cosine similarity using embedding_model
-    # For now: silent fallback to core
-    return _core_retrieve_similar(tasks, limit)
+    if limit <= 0:
+        return []
+
+    # Check optional dependency boundary first
+    np = _get_np()
+    if np is None:
+        return _core_retrieve_similar(tasks, limit)
+
+    try:
+        query_text = str(query_embedding)
+        query_emb = embedding_model.encode(query_text, convert_to_numpy=True)
+
+        task_texts = [task.description for task in tasks]
+        task_embs = embedding_model.encode(task_texts, convert_to_numpy=True)
+
+        # Normalize shapes for robustness (single vector vs batch)
+        query_emb = np.asarray(query_emb)
+        if query_emb.ndim > 1:
+            query_emb = query_emb[0]
+
+        task_embs = np.asarray(task_embs)
+        if task_embs.ndim == 1:
+            task_embs = task_embs.reshape(1, -1)
+
+        # Explicit cardinality guard: mismatch → silent fallback
+        if len(task_embs) != len(tasks):
+            return _core_retrieve_similar(tasks, limit)
+
+        scored = []
+        for task, task_emb in zip(tasks, task_embs):
+            score = _cosine_score(query_emb, task_emb, np)
+            # score desc, created_at desc (newer wins on ties), task
+            scored.append((score, task.created_at, task))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        ordered = [item[2] for item in scored[:limit]]
+        return ordered
+    except Exception:
+        # Silent atomic fallback
+        return _core_retrieve_similar(tasks, limit)
 
 
 def _optional_retrieve_scored(
-    tasks: List[TaskRecord],
+    tasks: Sequence[TaskRecord],
     query_embedding: Optional[Any],
     limit: int,
     embedding_model: Any | None,
 ) -> List[Tuple[TaskRecord, float]]:
     """
-    Private optional path: cosine scoring when model is available.
-    Falls back silently to core path if no model.
+    Optional path: real cosine scoring when model is available.
+    Silent atomic fallback to core path on any failure.
+
+    Note:
+    In the current integration, query_embedding is treated as query text and
+    encoded within this function. Future revisions may pass a precomputed
+    embedding instead, but this does not affect current behavior.
     """
     if embedding_model is None or query_embedding is None:
         return _core_retrieve_scored(tasks, limit)
 
-    # TODO: Implement cosine scoring using embedding_model
-    # For now: silent fallback to core
-    return _core_retrieve_scored(tasks, limit)
+    if limit <= 0:
+        return []
+
+    # Check optional dependency boundary first
+    np = _get_np()
+    if np is None:
+        return _core_retrieve_scored(tasks, limit)
+
+    try:
+        query_text = str(query_embedding)
+        query_emb = embedding_model.encode(query_text, convert_to_numpy=True)
+
+        task_texts = [task.description for task in tasks]
+        task_embs = embedding_model.encode(task_texts, convert_to_numpy=True)
+
+        # Normalize shapes for robustness (single vector vs batch)
+        query_emb = np.asarray(query_emb)
+        if query_emb.ndim > 1:
+            query_emb = query_emb[0]
+
+        task_embs = np.asarray(task_embs)
+        if task_embs.ndim == 1:
+            task_embs = task_embs.reshape(1, -1)
+
+        # Explicit cardinality guard: mismatch → silent fallback
+        if len(task_embs) != len(tasks):
+            return _core_retrieve_scored(tasks, limit)
+
+        scored = []
+        for task, task_emb in zip(tasks, task_embs):
+            score = _cosine_score(query_emb, task_emb, np)
+            scored.append((task, score))
+
+        # Sort by score desc, then by created_at desc for ties
+        scored.sort(key=lambda x: (x[1], x[0].created_at), reverse=True)
+        return scored[:limit]
+    except Exception:
+        # Silent atomic fallback
+        return _core_retrieve_scored(tasks, limit)
