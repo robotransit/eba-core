@@ -26,6 +26,9 @@ classifiers = [
 openai = [
     "openai>=1.0",
 ]
+embeddings = [
+    "sentence-transformers",
+]
 
 [build-system]
 requires = ["hatchling"]
