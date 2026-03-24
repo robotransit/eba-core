@@ -1,5 +1,8 @@
+# eck/agent.py
+"""Framework-agnostic core of the Epistemic Control Kernel (ECK)."""
+
 import logging
-from typing import Callable
+from typing import Callable, Any
 from dataclasses import replace
 
 from .queue import TaskQueue
@@ -64,6 +67,24 @@ class ECKAgent:
         self.drift = DriftMonitor(config=self.config)
 
         self.cycles: int = 0
+
+        # ── Optional embeddings wiring (ADR-032) ─────────────────────────────────────
+        # Model loading happens once at construction, gated by config.
+        # Failure is completely silent and atomic: _embedding_model remains None.
+        # No exception, no partial state, no observable divergence from core path.
+        self._enable_embeddings: bool = self.config.enable_embeddings
+        self._embedding_model: Any | None = None
+
+        if self._enable_embeddings:
+            try:
+                # Optional dependency — import only here, never at module level
+                from sentence_transformers import SentenceTransformer
+                self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+                # No log on success (to keep observable behavior minimal and consistent)
+            except Exception:
+                # Silent atomic fallback — no log, no exception, no partial state
+                self._embedding_model = None
+        # ─────────────────────────────────────────────────────────────────────────────
 
     def _record_task_created(self, task_id: str, task_text: str) -> None:
         """Record CREATED state when a task is enqueued."""
