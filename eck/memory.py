@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import NamedTuple, Optional, Sequence, Tuple
+from typing import Any, NamedTuple, Optional, Sequence, Tuple
 
 
 logger = logging.getLogger("eck-core")
@@ -96,12 +96,21 @@ class MemoryRetrieval:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _normalize_field(self, value: str) -> str:
-        """Locked normalization: line endings first, then strip, then collapse to single line."""
-        value = value.replace("\r\n", "\n").replace("\r", "\n")
-        value = value.strip()
-        value = value.replace("\n", " ")   # force single-line fields
-        return value
+    def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
+        """Phase 4: Produce canonical prompt block (or None if disabled/empty).
+
+        Formatting surface (ADR-026) remains unchanged.
+        """
+        if execution is None or not execution.items:
+            return None
+
+        formatted = self.format_memory_context(execution.items)
+
+        return RetrievalIntegration(
+            formatted_block=formatted,
+            item_count=len(execution.items),
+            context_length=len(formatted),
+        )
 
     def format_memory_context(self, records: Sequence[TaskRecord]) -> str:
         """
@@ -122,16 +131,16 @@ class MemoryRetrieval:
         ]
 
         for i, rec in enumerate(records, start=1):
-            task_id = self._normalize_field(str(rec.task_id))
-            summary = self._normalize_field(rec.description)
-            outcome = self._normalize_field("Completed" if rec.completed else "Pending")
+            task_id = str(rec.task_id).strip().replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+            description = rec.description.strip().replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+            outcome = ("Completed" if rec.completed else "Pending").strip()
             timestamp_str = self._format_timestamp(rec.created_at)
 
             lines.extend([
                 f"Record {i}",
                 f"Task ID: {task_id}",
                 f"Timestamp: {timestamp_str}",
-                f"Summary: {summary}",
+                f"Summary: {description}",
                 f"Outcome: {outcome}",
                 "",  # separator
             ])
@@ -144,19 +153,6 @@ class MemoryRetrieval:
 
         return "\n".join(lines)
 
-    def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
-        """Phase 4: Produce canonical prompt block (or None if disabled/empty)."""
-        if execution is None or not execution.items:
-            return None
-
-        formatted = self.format_memory_context(execution.items)
-
-        return RetrievalIntegration(
-            formatted_block=formatted,
-            item_count=len(execution.items),
-            context_length=len(formatted),
-        )
-
     def log_observability(self, enabled: bool, item_count: int, context_length: int) -> None:
         """Phase 5: Exactly one structured metadata log entry per enabled attempt."""
         self._run_id += 1
@@ -168,11 +164,14 @@ class MemoryRetrieval:
             "event_type": "retrieval_attempt"
         })
 
-    def retrieve(self, user_input: str) -> Optional[RetrievalIntegration]:
+    def retrieve(self, user_input: str, embedding_model: Any | None = None) -> Optional[RetrievalIntegration]:
         """Public entrypoint: full five-phase contract in one call.
 
         If disabled: zero retrieval activity (no log, no execution, None integration).
         If enabled: execution (possibly empty), integration, one deterministic log entry.
+
+        embedding_model is an optional internal advisory hook (passed from ECKAgent when available).
+        It does not affect formatting surface (ADR-026) or disabled/empty retrieval invariants.
         """
         query = self.build_retrieval_query(user_input)
 
@@ -184,8 +183,28 @@ class MemoryRetrieval:
         context_length = 0
         integration = None
         try:
-            execution = self._run_retrieval(query)
-            item_count = len(execution.items) if execution else 0
+            # Empty query is always empty, even when embeddings are active
+            if not query.text:
+                execution = RetrievalExecution(items=())
+            else:
+                # Get candidate set (broader for optional similarity)
+                if embedding_model is not None:
+                    candidate_items = list(self._mock_world_model)
+                else:
+                    execution = self._run_retrieval(query)
+                    candidate_items = list(execution.items)
+
+                # Advisory similarity ordering (changes order only)
+                if embedding_model is not None:
+                    from .similarity import _optional_retrieve_similar
+                    ordered_items = _optional_retrieve_similar(candidate_items, query.text, len(candidate_items), embedding_model)
+                else:
+                    from .similarity import retrieve_similar
+                    ordered_items = retrieve_similar(candidate_items, query.text, len(candidate_items))
+
+                execution = RetrievalExecution(items=tuple(ordered_items))
+
+            item_count = len(execution.items)
             integration = self.integrate_retrieval(execution)
             context_length = integration.context_length if integration else 0
         finally:
