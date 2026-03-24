@@ -71,16 +71,15 @@ class ECKAgent:
         # ── Optional embeddings wiring (ADR-032) ─────────────────────────────────────
         # Model loading happens once at construction, gated by config.
         # Failure is completely silent and atomic: _embedding_model remains None.
-        # No exception, no partial state, no observable divergence from core path.
+        # No exception, no log, no partial state.
         self._enable_embeddings: bool = self.config.enable_embeddings
         self._embedding_model: Any | None = None
 
         if self._enable_embeddings:
             try:
-                # Optional dependency — import only here, never at module level
+                # Optional dependency — import only here
                 from sentence_transformers import SentenceTransformer
                 self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-                # No log on success (to keep observable behavior minimal and consistent)
             except Exception:
                 # Silent atomic fallback — no log, no exception, no partial state
                 self._embedding_model = None
