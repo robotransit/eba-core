@@ -5,7 +5,7 @@ import logging
 from typing import Callable, Any
 from dataclasses import replace
 
-from .queue import TaskQueue
+from .queue import TaskQueue, QueueFullError
 from .memory import MemoryRetrieval
 from .drift import DriftMonitor
 from .utils import (
@@ -270,9 +270,33 @@ class ECKAgent:
                 max_subtasks=5,
             )
 
+            pushed = 0
             for sub in subtasks:
                 sub_id = generate_id()
-                self.queue.push({"id": sub_id, "text": sub})
+                try:
+                    self.queue.push({"id": sub_id, "text": sub})
+                    pushed += 1
+                except QueueFullError:
+                    logger.warning(
+                        "Subtask dropped — queue at capacity",
+                        extra={
+                            "task_id": task_id,
+                            "queue_size": len(self.queue),
+                            "max_size": self.config.max_queue_size,
+                        },
+                    )
+                    break
+
+            logger.info(
+                "Subtasks generated",
+                extra={
+                    "task_id": task_id,
+                    "generated": len(subtasks),
+                    "pushed": pushed,
+                    "queue_size": len(self.queue),
+                    "policy_mode": self.current_policy_mode.name,
+                },
+            )
 
         self.cycles += 1
 
