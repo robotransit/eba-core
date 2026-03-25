@@ -1,7 +1,7 @@
 # eck/critic.py
 """Critic subsystem (ADR-022–024).
 
-Evaluates task outcomes and returns a categorical CriticOutcome for
+Evaluates task outcomes and returns a typed CriticOutcome for
 consumption by the confidence signal processor (ADR-025).
 
 Design:
@@ -9,13 +9,16 @@ Design:
 - Kernel derives category (success/partial/failure) from outcome + severity
 - LLM never sees "partial" — category is kernel-controlled
 - All downstream confidence mechanics remain kernel authority
+- CriticOutcome is imported from eck.types (single source of truth)
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Optional
+
+from eck.types import CriticOutcome, make_critic_outcome
 
 logger = logging.getLogger("eck-core")
 
@@ -24,25 +27,6 @@ logger = logging.getLogger("eck-core")
 # Below this: partial category (both confidence directions permitted,
 # no failure window triggered).
 _DEFAULT_PARTIAL_THRESHOLD = 0.5
-
-
-class CriticOutcome(NamedTuple):
-    """
-    Typed output of critic evaluation (ADR-022).
-
-    category: kernel-derived outcome category
-        "success"  — result met constraints; upward confidence permitted
-        "partial"  — low-severity failure; both directions permitted, no failure window
-        "failure"  — hard constraint violation; downward + failure window triggered
-        "rejected" — no execution occurred; no confidence update (ADR-021)
-    severity: float [0.0, 1.0] — scales magnitude of confidence delta within category
-    feedback: human-readable explanation from critic
-    success: convenience bool — True only when category == "success"
-    """
-    category: str
-    severity: float
-    feedback: str
-    success: bool
 
 
 def critic_evaluate(
@@ -91,7 +75,6 @@ def critic_evaluate(
         category = _derive_category(outcome1, severity1, partial_threshold)
         final_severity = _clamp(severity1)
         final_feedback = feedback1
-        final_outcome = outcome1
     else:
         # Second critic call for consensus
         raw2 = llm_call(prompt)
@@ -119,7 +102,7 @@ def critic_evaluate(
 
         category = _derive_category(final_outcome, final_severity, partial_threshold)
 
-    # Optional external verification hook — can demote to failure (ADR-022)
+    # Optional external verification hook — can only demote to failure (ADR-022)
     if verifier_callback is not None:
         if not verifier_callback(task_text, result):
             category = "failure"
@@ -142,11 +125,10 @@ def critic_evaluate(
         },
     )
 
-    return CriticOutcome(
+    return make_critic_outcome(
         category=category,
         severity=final_severity,
         feedback=final_feedback,
-        success=(category == "success"),
     )
 
 
@@ -247,7 +229,6 @@ def _derive_category(
     """
     if outcome == "success":
         return "success"
-    # outcome == "failure"
     if severity < partial_threshold:
         return "partial"
     return "failure"
