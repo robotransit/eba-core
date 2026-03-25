@@ -18,7 +18,6 @@ from .config import ECKConfig, PolicyMode
 from .prompts import (
     format_prompt,
     INITIAL_TASK_PROMPT_TEMPLATE,
-    GOAL_ACHIEVED_PROMPT,
 )
 from .critic import critic_evaluate
 from .prediction import generate_prediction
@@ -59,11 +58,13 @@ class ECKAgent:
         self.current_policy_mode: PolicyMode = self.config.policy_mode
 
         # Current confidence (placeholder — future: rolling signal)
+        # NOTE: Replace with ConfidenceSignal(alpha=self.config.confidence_alpha)
+        # when ADR-021–025 wiring is complete.
         self.current_confidence: float = 0.5
 
         self.queue = TaskQueue(max_size=self.config.max_queue_size)
 
-        # Memory retrieval (current contract)
+        # Memory retrieval (current contract — ADR-026–030)
         self.memory = MemoryRetrieval(enabled=self.config.enable_memory_retrieval)
 
         # NOTE:
@@ -112,7 +113,8 @@ class ECKAgent:
 
     def step(self) -> bool:
         """Execute one full control cycle."""
-        # Irreversible policy upgrades only
+
+        # ── Policy escalation (irreversible upgrades only) ────────────
         recommended_mode = self.drift.get_policy_mode()
         if _POLICY_ORDER[recommended_mode] > _POLICY_ORDER[self.current_policy_mode]:
             previous_policy_mode = self.current_policy_mode
@@ -124,14 +126,17 @@ class ECKAgent:
                 "Policy upgrade",
                 extra={
                     "previous_policy_mode": previous_policy_mode.name,
-                    "recommended_mode": recommended_mode.name,
                     "new_policy_mode": self.current_policy_mode.name,
                     "drift_streak": self.drift.drift_streak,
+                    "total_drift_events": self.drift.total_drift_events(),
                 },
             )
 
         if self.current_policy_mode == PolicyMode.HALT:
-            logger.critical("Policy mode HALT — stopping agent")
+            logger.critical(
+                "Policy mode HALT — stopping agent",
+                extra={"drift_snapshot": self.drift.snapshot()},
+            )
             return False
 
         task = self.queue.pop()
@@ -143,9 +148,9 @@ class ECKAgent:
         task_text = task["text"]
 
         # 1. Prediction
-        # NOTE:
-        # Forward integration seam (ADR-032).
-        # prediction.py must be updated to accept and propagate `embedding_model`.
+        # NOTE (ADR-032):
+        # embedding_model is passed to prediction.py which propagates it
+        # to MemoryRetrieval for optional cosine retrieval.
         prediction = generate_prediction(
             task_text=task_text,
             objective=self.objective,
@@ -167,6 +172,7 @@ class ECKAgent:
             logger.info(
                 "Execution skipped",
                 extra={
+                    "task_id": task_id,
                     "policy_mode": self.current_policy_mode.name,
                     "recommendation": recommended_breadth,
                     "confidence": self.current_confidence,
@@ -176,22 +182,33 @@ class ECKAgent:
 
         # 3. Critic (ADR-022)
         # NOTE:
-        # critic_evaluate now returns CriticOutcome (category, severity, feedback, success).
-        # outcome.severity feeds DriftMonitor as the error signal until the confidence
-        # signal processor (ADR-021–025) is wired — at which point this becomes an
-        # input to ConfidenceSignalProcessor.update() instead.
+        # critic_outcome.severity feeds DriftMonitor as the error signal
+        # until the confidence signal processor (ADR-021–025) is wired —
+        # at which point critic_outcome will be passed directly to
+        # ConfidenceSignalProcessor.update() instead.
         critic_outcome = critic_evaluate(
             task_text=task_text,
             prediction=prediction,
             result=outcome,
             objective=self.objective,
             llm_call=self.llm,
+            partial_threshold=self.config.partial_threshold,
         )
         success = critic_outcome.success
         feedback = critic_outcome.feedback
         error = critic_outcome.severity
 
-        # 4. Drift tracking (append-only, no reset)
+        logger.info(
+            "Critic evaluated",
+            extra={
+                "task_id": task_id,
+                "category": critic_outcome.category,
+                "severity": critic_outcome.severity,
+                "success": critic_outcome.success,
+            },
+        )
+
+        # 4. Drift tracking (append-only, no reset — ADR-040)
         perceptual_drift = self.drift.record_error(error)
         feasible = is_numeric_feasible(prediction, outcome)
         self.drift.record_feasibility(feasible, success)
@@ -201,43 +218,48 @@ class ECKAgent:
         else:
             self.drift.clear_streak()
 
-        # ADR-040 observability: agent loop is canonical logging point for drift state
+        # ADR-040 observability: agent loop is canonical logging point
+        drift_snap = self.drift.snapshot()
         logger.info(
             "Drift state updated",
             extra={
                 "task_id": task_id,
                 "perceptual_drift": perceptual_drift,
-                "drift_streak": self.drift.drift_streak,
-                "policy_mode": self.current_policy_mode.name,
-                "feasible": feasible,
-                "success": success,
+                **drift_snap,
             },
         )
 
+        # Drift streak halt
         if self.drift.drift_streak > self.config.max_drift_streak:
             logger.critical(
                 "Repeated drift detected — halting agent",
                 extra={
                     "task_id": task_id,
-                    "drift_streak": self.drift.drift_streak,
-                    "max_drift_streak": self.config.max_drift_streak,
-                    "policy_mode": self.current_policy_mode.name,
+                    **drift_snap,
+                },
+            )
+            return False
+
+        # Severe instability halt (independent of streak — ADR-040)
+        if self.drift.severe():
+            logger.critical(
+                "Severe instability detected — halting agent",
+                extra={
+                    "task_id": task_id,
+                    **drift_snap,
                 },
             )
             return False
 
         # 5. Goal check
-        # TODO(ADR-039/loop reconciliation):
-        # Goal completion currently uses legacy free-form LLM string matching.
-        # Replace with a deterministic or structured decision surface aligned with v0.2.0.
-        goal_prompt = format_prompt(
-            GOAL_ACHIEVED_PROMPT,
-            objective=self.objective,
-            result=outcome,
-        )
-        if "YES" in self.llm(goal_prompt).upper():
-            logger.info("Goal achieved — stopping early")
-            return False
+        # TODO(ADR-041):
+        # Replace with deterministic predicate:
+        #   success AND queue naturally exhausted AND
+        #   confidence >= config.goal_completion_threshold
+        # GOAL_ACHIEVED_PROMPT and free-form LLM string matching
+        # are non-compliant with ADR-033 and must be removed.
+        # Requires: per-cycle subtask suppression flag,
+        #           confidence signal wiring (ADR-021–025).
 
         # 6. Subtask generation (policy-gated)
         if should_execute(self.current_policy_mode, recommended_breadth):
@@ -256,13 +278,13 @@ class ECKAgent:
 
         # 7. Periodic guard
         if self.cycles % self.config.guard_interval == 0:
-            if self.drift.severe():
-                logger.error(
+            snap = self.drift.snapshot()
+            if snap["severe"]:
+                logger.critical(
                     "Severe instability detected — halting agent",
                     extra={
                         "task_id": task_id,
-                        "drift_streak": self.drift.drift_streak,
-                        "policy_mode": self.current_policy_mode.name,
+                        **snap,
                     },
                 )
                 return False
@@ -271,8 +293,14 @@ class ECKAgent:
 
     def run(self) -> None:
         """Run the agent until halt or max iterations."""
-        logger.info(f"Starting ECK run with objective: {self.objective}")
+        logger.info(
+            "ECK run starting",
+            extra={"objective": self.objective},
+        )
         while self.cycles < self.config.max_iterations:
             if not self.step():
                 break
-        logger.info(f"ECK run completed after {self.cycles} cycles")
+        logger.info(
+            "ECK run completed",
+            extra={"cycles": self.cycles},
+        )
