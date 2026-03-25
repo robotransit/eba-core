@@ -174,14 +174,22 @@ class ECKAgent:
             )
             outcome = ""
 
-        # 3. Critic
-        success, feedback, error = critic_evaluate(
+        # 3. Critic (ADR-022)
+        # NOTE:
+        # critic_evaluate now returns CriticOutcome (category, severity, feedback, success).
+        # outcome.severity feeds DriftMonitor as the error signal until the confidence
+        # signal processor (ADR-021–025) is wired — at which point this becomes an
+        # input to ConfidenceSignalProcessor.update() instead.
+        critic_outcome = critic_evaluate(
             task_text=task_text,
             prediction=prediction,
             result=outcome,
             objective=self.objective,
             llm_call=self.llm,
         )
+        success = critic_outcome.success
+        feedback = critic_outcome.feedback
+        error = critic_outcome.severity
 
         # 4. Drift tracking (append-only, no reset)
         perceptual_drift = self.drift.record_error(error)
