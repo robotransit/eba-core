@@ -168,6 +168,15 @@ class ECKAgent:
             policy_mode=self.current_policy_mode,
         )
 
+        # Per-cycle suppression flag (ADR-041):
+        # Captures whether the current policy state permits subtask generation.
+        # Used in step 5 to distinguish natural queue exhaustion from
+        # policy-suppressed emptiness — a queue empty due to suppression
+        # is not a valid completion signal.
+        subtasks_suppressed = not should_execute(
+            self.current_policy_mode, recommended_breadth
+        )
+
         if should_execute(self.current_policy_mode, recommended_breadth):
             outcome = execute_task(task_text, self.llm)
         else:
@@ -270,18 +279,34 @@ class ECKAgent:
             )
             return False
 
-        # 5. Goal check
-        # TODO(ADR-041):
-        # Replace with deterministic predicate:
-        #   success AND queue naturally exhausted AND
-        #   confidence >= config.goal_completion_threshold
-        # GOAL_ACHIEVED_PROMPT and free-form LLM string matching
-        # are non-compliant with ADR-033 and must be removed.
-        # Requires: per-cycle subtask suppression flag,
-        #           confidence signal wiring (ADR-021–025).
+        # 5. Goal completion predicate (ADR-041)
+        # Three conditions must all be true:
+        #   - current task succeeded (critic)
+        #   - queue is naturally exhausted (not policy-suppressed)
+        #   - confidence >= goal_completion_threshold
+        current_confidence = self._confidence.get_value()
+        if (
+            success
+            and self.queue.is_empty()
+            and not subtasks_suppressed
+            and current_confidence >= self.config.goal_completion_threshold
+        ):
+            logger.info(
+                "Goal completion predicate satisfied — stopping agent",
+                extra={
+                    "task_id": task_id,
+                    "confidence": round(current_confidence, 4),
+                    "goal_completion_threshold": self.config.goal_completion_threshold,
+                    "queue_size": len(self.queue),
+                    "subtasks_suppressed": subtasks_suppressed,
+                    "policy_mode": self.current_policy_mode.name,
+                    "critic_category": critic_outcome.category,
+                },
+            )
+            return False
 
         # 6. Subtask generation (policy-gated)
-        if should_execute(self.current_policy_mode, recommended_breadth):
+        if not subtasks_suppressed:
             subtasks = generate_subtasks(
                 current_task=task_text,
                 objective=self.objective,
