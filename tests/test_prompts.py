@@ -1,48 +1,116 @@
-import pytest
+# tests/test_prompts.py
+"""Tests for prompt templates and formatting utilities (ADR-033)."""
+
+from __future__ import annotations
+
+import unittest
 
 from eck.prompts import (
-    format_prompt,
     INITIAL_TASK_PROMPT_TEMPLATE,
-    SUBTASK_GENERATION_PROMPT,
     PREDICTION_PROMPT_TEMPLATE,
-    GOAL_ACHIEVED_PROMPT,
-    CRITIC_EVALUATION_PROMPT,
+    SUBTASK_GENERATION_PROMPT,
+    format_prompt,
 )
 
 
-def test_format_prompt_substitutes_placeholders_correctly():
-    """format_prompt replaces all {placeholders} and leaves no {} tokens."""
-    template = "Hello {name}, your age is {age}."
-    result = format_prompt(template, name="Alice", age=30)
-    assert result == "Hello Alice, your age is 30."
-    assert "{" not in result and "}" not in result
+class TestFormatPrompt(unittest.TestCase):
+    """format_prompt utility."""
+
+    def test_substitutes_placeholders_correctly(self) -> None:
+        """format_prompt replaces all placeholders correctly."""
+        template = "Hello {name}, your age is {age}."
+        result = format_prompt(template, name="Alice", age=30)
+        self.assertEqual(result, "Hello Alice, your age is 30.")
+
+    def test_no_remaining_braces_after_substitution(self) -> None:
+        """No unsubstituted placeholders remain after format_prompt."""
+        result = format_prompt(
+            INITIAL_TASK_PROMPT_TEMPLATE,
+            objective="test objective",
+        )
+        self.assertNotIn("{objective}", result)
 
 
-def test_initial_task_prompt_contains_contractual_constraints():
-    """INITIAL_TASK_PROMPT_TEMPLATE mentions objective and requests a single task output."""
-    text = INITIAL_TASK_PROMPT_TEMPLATE.lower()
-    assert "objective" in text
-    assert "task" in text
-    assert "only" in text  # “task string only”
+class TestInitialTaskPrompt(unittest.TestCase):
+    """INITIAL_TASK_PROMPT_TEMPLATE contract."""
+
+    def test_contains_objective_placeholder(self) -> None:
+        """Template references {objective}."""
+        self.assertIn("{objective}", INITIAL_TASK_PROMPT_TEMPLATE)
+
+    def test_formatted_contains_objective(self) -> None:
+        """Formatted prompt contains the objective text."""
+        result = format_prompt(
+            INITIAL_TASK_PROMPT_TEMPLATE,
+            objective="world peace",
+        )
+        self.assertIn("world peace", result)
+
+    def test_requests_single_task_output(self) -> None:
+        """Template asks for a single task string only."""
+        self.assertIn("only", INITIAL_TASK_PROMPT_TEMPLATE.lower())
 
 
-def test_subtask_generation_prompt_contains_contractual_constraints():
-    """SUBTASK_GENERATION_PROMPT includes “Return ONLY a valid JSON array”."""
-    assert "Return ONLY a valid JSON array" in SUBTASK_GENERATION_PROMPT
+class TestSubtaskGenerationPrompt(unittest.TestCase):
+    """SUBTASK_GENERATION_PROMPT contract."""
+
+    def test_contains_json_array_instruction(self) -> None:
+        """Template instructs LLM to return a valid JSON array."""
+        self.assertIn("Return ONLY a valid JSON array", SUBTASK_GENERATION_PROMPT)
+
+    def test_contains_objective_and_task_placeholders(self) -> None:
+        """Template references {objective} and {current_task}."""
+        self.assertIn("{objective}", SUBTASK_GENERATION_PROMPT)
+        self.assertIn("{current_task}", SUBTASK_GENERATION_PROMPT)
 
 
-def test_prediction_prompt_contains_contractual_constraints():
-    """PREDICTION_PROMPT_TEMPLATE includes “Return ONLY a brief string prediction”."""
-    assert "Return ONLY a brief string prediction" in PREDICTION_PROMPT_TEMPLATE
+class TestPredictionPrompt(unittest.TestCase):
+    """PREDICTION_PROMPT_TEMPLATE contract."""
+
+    def test_contains_brief_string_instruction(self) -> None:
+        """Template instructs LLM to return a brief string prediction."""
+        self.assertIn("Return ONLY a brief string prediction", PREDICTION_PROMPT_TEMPLATE)
+
+    def test_contains_required_placeholders(self) -> None:
+        """Template references {memory_context}, {objective}, {task_text}."""
+        self.assertIn("{memory_context}", PREDICTION_PROMPT_TEMPLATE)
+        self.assertIn("{objective}", PREDICTION_PROMPT_TEMPLATE)
+        self.assertIn("{task_text}", PREDICTION_PROMPT_TEMPLATE)
+
+    def test_empty_memory_context_no_leading_blank_line(self) -> None:
+        """Empty memory_context produces no leading blank line in formatted prompt."""
+        result = format_prompt(
+            PREDICTION_PROMPT_TEMPLATE,
+            memory_context="",
+            objective="test",
+            task_text="do something",
+        )
+        self.assertFalse(result.startswith("\n"))
+
+    def test_adr_033_goal_achieved_prompt_absent(self) -> None:
+        """GOAL_ACHIEVED_PROMPT must not exist in eck.prompts (ADR-033)."""
+        import eck.prompts as prompts_module
+        self.assertFalse(
+            hasattr(prompts_module, "GOAL_ACHIEVED_PROMPT"),
+            "GOAL_ACHIEVED_PROMPT must not exist — removed per ADR-033",
+        )
+
+    def test_adr_033_critic_evaluation_prompt_absent(self) -> None:
+        """CRITIC_EVALUATION_PROMPT must not exist in eck.prompts (ADR-033)."""
+        import eck.prompts as prompts_module
+        self.assertFalse(
+            hasattr(prompts_module, "CRITIC_EVALUATION_PROMPT"),
+            "CRITIC_EVALUATION_PROMPT must not exist — superseded by critic.py",
+        )
+
+    def test_adr_033_prioritization_prompt_absent(self) -> None:
+        """PRIORITIZATION_PROMPT must not exist in eck.prompts (ADR-033)."""
+        import eck.prompts as prompts_module
+        self.assertFalse(
+            hasattr(prompts_module, "PRIORITIZATION_PROMPT"),
+            "PRIORITIZATION_PROMPT must not exist — removed per ADR-033",
+        )
 
 
-def test_goal_achieved_prompt_contains_contractual_constraints():
-    """GOAL_ACHIEVED_PROMPT includes Answer ONLY "YES" or "NO"."""
-    assert 'Answer ONLY "YES" or "NO"' in GOAL_ACHIEVED_PROMPT
-
-
-def test_critic_evaluation_prompt_contains_contractual_constraints():
-    """CRITIC_EVALUATION_PROMPT includes Return ONLY valid JSON and the schema."""
-    assert "Return ONLY valid JSON" in CRITIC_EVALUATION_PROMPT
-    assert '"success": true/false' in CRITIC_EVALUATION_PROMPT
-    assert '"feedback": "brief explanation"' in CRITIC_EVALUATION_PROMPT
+if __name__ == "__main__":
+    unittest.main()
