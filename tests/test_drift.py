@@ -53,13 +53,14 @@ class TestRecordError(unittest.TestCase):
     """record_error() warmup, z-score, and append-only behaviour."""
 
     def setUp(self) -> None:
-        self.dm = DriftMonitor(config=_config())
+        # drift_warmup_samples=9 ensures the z-score window captures
+        # the stable baseline when testing outlier detection
+        self.dm = DriftMonitor(config=_config(drift_warmup_samples=9))
 
     def test_returns_false_during_warmup(self) -> None:
         """Returns False while fewer than drift_warmup_samples recorded."""
         self.assertFalse(self.dm.record_error(1.0))
         self.assertFalse(self.dm.record_error(1.0))
-        # warmup_samples=3, so third call may trigger
 
     def test_error_history_grows_unbounded(self) -> None:
         """error_history is append-only — grows with every call."""
@@ -100,9 +101,7 @@ class TestRegisterDriftAndStreak(unittest.TestCase):
     """register_drift(), clear_streak(), and append-only drift_events."""
 
     def setUp(self) -> None:
-        # drift_warmup_samples=9 ensures the z-score window captures
-        # the stable baseline when testing outlier detection
-        self.dm = DriftMonitor(config=_config(drift_warmup_samples=9))
+        self.dm = DriftMonitor(config=_config())
 
     def test_register_drift_appends_to_drift_events(self) -> None:
         """register_drift() appends to drift_events (append-only)."""
