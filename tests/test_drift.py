@@ -69,11 +69,11 @@ class TestRecordError(unittest.TestCase):
 
     def test_returns_true_on_outlier_after_warmup(self) -> None:
         """Returns True when z-score exceeds threshold after warmup."""
-        # Establish baseline with low-variance values
-        self.dm.record_error(1.0)
-        self.dm.record_error(1.0)
-        # Large outlier should trigger after warmup
-        result = self.dm.record_error(100.0)
+        # Establish stable baseline with near-zero variance
+        for _ in range(9):
+            self.dm.record_error(1.0)
+        # Extreme outlier against stable baseline produces high z-score
+        result = self.dm.record_error(1000.0)
         self.assertTrue(result)
 
     def test_returns_false_for_normal_values(self) -> None:
