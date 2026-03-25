@@ -1,0 +1,68 @@
+# .github/workflows/ci-capability.yml
+# Capability / Optional Layer — non-blocking (ADR-034/035)
+# Runs after core passes. Failures warn but do not block merge.
+# May use optional extras and local LLM stubs.
+
+name: CI Capability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  capability-tests:
+    name: Capability Tests (extras=${{ matrix.extras }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+        extras: ["none", "embeddings"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: capability-${{ matrix.python-version }}-${{ matrix.extras }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: capability-${{ matrix.python-version }}-${{ matrix.extras }}-
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ matrix.extras }}" = "embeddings" ]; then
+            pip install -e ".[test,embeddings]"
+          else
+            pip install -e ".[test]"
+          fi
+
+      - name: Run capability tests
+        run: |
+          pytest \
+            -m "capability" \
+            --cov=eck \
+            --cov-report=xml \
+            --cov-report=html \
+            --strict-markers \
+            --tb=short \
+            -v \
+            || echo "Capability tests failed (non-blocking)"
+
+      - name: Upload capability artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capability-artifacts-${{ matrix.extras }}
+          path: |
+            htmlcov/
+            coverage.xml
+          retention-days: 7
