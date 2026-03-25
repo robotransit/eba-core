@@ -6,7 +6,7 @@ from typing import Callable, Any
 from dataclasses import replace
 
 from .queue import TaskQueue
-from .memory import WorldModel
+from .memory import MemoryRetrieval
 from .drift import DriftMonitor
 from .utils import (
     generate_id,
@@ -24,7 +24,6 @@ from .critic import critic_evaluate
 from .prediction import generate_prediction
 from .task_generation import generate_subtasks
 from .execution import execute_task
-from .task import TaskState
 
 logger = logging.getLogger("eck-core")
 
@@ -49,7 +48,7 @@ class ECKAgent:
     def __init__(
         self,
         objective: str,
-        llm_call: Callable[[str], str],  # Single LLM function for all prompts
+        llm_call: Callable[[str], str],
         config: ECKConfig = None,
     ):
         self.objective = objective
@@ -63,39 +62,33 @@ class ECKAgent:
         self.current_confidence: float = 0.5
 
         self.queue = TaskQueue(max_size=self.config.max_queue_size)
-        self.memory = WorldModel()
+
+        # Memory retrieval (current contract)
+        self.memory = MemoryRetrieval(enabled=self.config.enable_memory_retrieval)
+
+        # NOTE:
+        # Task lifecycle recording is currently absent.
+        # This must be addressed via the v0.2.0 audit/observability layer,
+        # not by reintroducing mutable memory semantics.
+
         self.drift = DriftMonitor(config=self.config)
 
         self.cycles: int = 0
 
         # ── Optional embeddings wiring (ADR-032) ─────────────────────────────────────
         # Model loading happens once at construction, gated by config.
-        # Failure is completely silent and atomic: _embedding_model remains None.
-        # No exception, no log, no partial state.
+        # Failure is completely silent and atomic.
         self._enable_embeddings: bool = self.config.enable_embeddings
         self._embedding_model: Any | None = None
 
         if self._enable_embeddings:
             try:
-                # Optional dependency — import only here
                 from sentence_transformers import SentenceTransformer
                 self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
             except Exception:
-                # Silent atomic fallback — no log, no exception, no partial state
+                # Silent atomic fallback
                 self._embedding_model = None
         # ─────────────────────────────────────────────────────────────────────────────
-
-    def _record_task_created(self, task_id: str, task_text: str) -> None:
-        """Record CREATED state when a task is enqueued."""
-        self.memory.record(
-            task_id=task_id,
-            task_text=task_text,
-            prediction="",
-            outcome="",
-            success=False,
-            feedback="",
-            state=TaskState.CREATED,
-        )
 
     def seed(self, initial_task: str = None) -> None:
         """Seed the agent with an initial task (or generate one)."""
@@ -108,22 +101,34 @@ class ECKAgent:
 
         task_id = generate_id()
         self.queue.push({"id": task_id, "text": initial_task})
-        self._record_task_created(task_id, initial_task)
 
-        logger.info(f"Agent seeded with initial task: {initial_task}")
+        logger.info(
+            "Agent seeded",
+            extra={
+                "task_id": task_id,
+                "initial_task": initial_task,
+            },
+        )
 
     def step(self) -> bool:
         """Execute one full control cycle."""
         # Irreversible policy upgrades only
         recommended_mode = self.drift.get_policy_mode()
         if _POLICY_ORDER[recommended_mode] > _POLICY_ORDER[self.current_policy_mode]:
+            previous_policy_mode = self.current_policy_mode
             self.current_policy_mode = recommended_mode
             self.config = replace(self.config, policy_mode=recommended_mode)
-
-            # Invariant: DriftMonitor must observe the same config as the agent
             self.drift.config = self.config
 
-            logger.info(f"Policy upgrade: {self.current_policy_mode.name}")
+            logger.info(
+                "Policy upgrade",
+                extra={
+                    "previous_policy_mode": previous_policy_mode.name,
+                    "recommended_mode": recommended_mode.name,
+                    "new_policy_mode": self.current_policy_mode.name,
+                    "drift_streak": self.drift.drift_streak,
+                },
+            )
 
         if self.current_policy_mode == PolicyMode.HALT:
             logger.critical("Policy mode HALT — stopping agent")
@@ -137,23 +142,17 @@ class ECKAgent:
         task_id = task["id"]
         task_text = task["text"]
 
-        self.memory.record(
-            task_id=task_id,
-            task_text=task_text,
-            prediction="",
-            outcome="",
-            success=False,
-            feedback="",
-            state=TaskState.PREDICTED,
-        )
-
         # 1. Prediction
+        # NOTE:
+        # Forward integration seam (ADR-032).
+        # prediction.py must be updated to accept and propagate `embedding_model`.
         prediction = generate_prediction(
             task_text=task_text,
             objective=self.objective,
             llm_call=self.llm,
             memory=self.memory,
             config=self.config,
+            embedding_model=self._embedding_model,
         )
 
         # 2. Execution (policy-gated)
@@ -175,16 +174,6 @@ class ECKAgent:
             )
             outcome = ""
 
-        self.memory.record(
-            task_id=task_id,
-            task_text=task_text,
-            prediction=prediction,
-            outcome=outcome,
-            success=False,
-            feedback="",
-            state=TaskState.EXECUTED,
-        )
-
         # 3. Critic
         success, feedback, error = critic_evaluate(
             task_text=task_text,
@@ -194,25 +183,7 @@ class ECKAgent:
             llm_call=self.llm,
         )
 
-        final_state = (
-            TaskState.SUCCEEDED
-            if success
-            else TaskState.REJECTED_BY_CRITIC
-            if feedback
-            else TaskState.FAILED
-        )
-
-        self.memory.record(
-            task_id=task_id,
-            task_text=task_text,
-            prediction=prediction,
-            outcome=outcome,
-            success=success,
-            feedback=feedback,
-            state=final_state,
-        )
-
-        # 4. Drift tracking
+        # 4. Drift tracking (append-only, no reset)
         perceptual_drift = self.drift.record_error(error)
         feasible = is_numeric_feasible(prediction, outcome)
         self.drift.record_feasibility(feasible, success)
@@ -222,11 +193,35 @@ class ECKAgent:
         else:
             self.drift.clear_streak()
 
+        # ADR-040 observability: agent loop is canonical logging point for drift state
+        logger.info(
+            "Drift state updated",
+            extra={
+                "task_id": task_id,
+                "perceptual_drift": perceptual_drift,
+                "drift_streak": self.drift.drift_streak,
+                "policy_mode": self.current_policy_mode.name,
+                "feasible": feasible,
+                "success": success,
+            },
+        )
+
         if self.drift.drift_streak > self.config.max_drift_streak:
-            logger.critical("Repeated drift detected — halting agent")
+            logger.critical(
+                "Repeated drift detected — halting agent",
+                extra={
+                    "task_id": task_id,
+                    "drift_streak": self.drift.drift_streak,
+                    "max_drift_streak": self.config.max_drift_streak,
+                    "policy_mode": self.current_policy_mode.name,
+                },
+            )
             return False
 
         # 5. Goal check
+        # TODO(ADR-039/loop reconciliation):
+        # Goal completion currently uses legacy free-form LLM string matching.
+        # Replace with a deterministic or structured decision surface aligned with v0.2.0.
         goal_prompt = format_prompt(
             GOAL_ACHIEVED_PROMPT,
             objective=self.objective,
@@ -248,15 +243,21 @@ class ECKAgent:
             for sub in subtasks:
                 sub_id = generate_id()
                 self.queue.push({"id": sub_id, "text": sub})
-                self._record_task_created(sub_id, sub)
 
         self.cycles += 1
 
         # 7. Periodic guard
         if self.cycles % self.config.guard_interval == 0:
             if self.drift.severe():
-                logger.error("Severe instability detected — resetting drift monitor")
-                self.drift = DriftMonitor(config=self.config)
+                logger.error(
+                    "Severe instability detected — halting agent",
+                    extra={
+                        "task_id": task_id,
+                        "drift_streak": self.drift.drift_streak,
+                        "policy_mode": self.current_policy_mode.name,
+                    },
+                )
+                return False
 
         return True
 
