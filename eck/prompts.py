@@ -1,8 +1,19 @@
+# eck/prompts.py
 """
 Prompt templates and formatting utilities for ECK LLM calls.
 
 All prompts are defined as constants here for easy maintenance and testing.
+
+ADR-033 compliance (removed prompts):
+  - GOAL_ACHIEVED_PROMPT: removed — lifecycle decisions must not be
+    delegated to unconstrained LLM output (ADR-033). Replacement
+    deterministic predicate defined in ADR-041.
+  - PRIORITIZATION_PROMPT: removed — queue ordering must remain
+    deterministic and prompt-independent (ADR-033).
+  - CRITIC_EVALUATION_PROMPT: removed — superseded by _build_prompt()
+    in critic.py which uses the ADR-022 compliant outcome/severity schema.
 """
+
 
 INITIAL_TASK_PROMPT_TEMPLATE = """
 Generate the very first concrete task to start pursuing the objective: {objective}
@@ -25,54 +36,16 @@ or
 []
 """
 
-# memory_context may be empty; it is informational only
-PREDICTION_PROMPT_TEMPLATE = """
-{memory_context}
-
-Predict the expected outcome for this task toward the objective '{objective}'.
+# memory_context may be empty; it is informational only (ADR-028).
+# When empty the prompt collapses cleanly with no leading blank line.
+PREDICTION_PROMPT_TEMPLATE = """{memory_context}Predict the expected outcome for this task toward the objective '{objective}'.
 
 Task: {task_text}
 
 Return ONLY a brief string prediction of the result.
 """
 
-CRITIC_EVALUATION_PROMPT = """
-Evaluate the result against the task and objective.
-
-Task: {task_text}
-Prediction: {prediction}
-Result: {result}
-Objective: {objective}
-
-Return ONLY valid JSON:
-{{
-  "success": true/false,
-  "feedback": "brief explanation"
-}}
-
-Respond with true if the result meaningfully advances the objective.
-"""
-
-GOAL_ACHIEVED_PROMPT = """
-Did this result achieve the final objective?
-
-Objective: {objective}
-Latest result: {result}
-
-Answer ONLY "YES" or "NO".
-"""
-
-PRIORITIZATION_PROMPT = """
-Prioritize the following tasks by relevance and urgency to the objective: "{objective}"
-
-Tasks:
-{task_list_json}
-
-Return ONLY a JSON array of the task texts in prioritized order.
-Example: ["Highest priority", "Next", ...]
-"""
 
 def format_prompt(template: str, **kwargs) -> str:
     """Format a prompt template with variables."""
     return template.format(**kwargs)
-
