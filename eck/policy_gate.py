@@ -96,6 +96,9 @@ class DefaultPolicyGate(PolicyGate):
 
     HALT_THRESHOLD    = 0.40
     RETRY_THRESHOLD   = 0.70
+    # Execution threshold only — governs when the gate authorises execution.
+    # Conceptually distinct from ECKConfig.goal_completion_threshold (ADR-041)
+    # even though both default to 0.90. Do not implicitly couple these values.
     DEGRADE_THRESHOLD = 0.90
 
     def evaluate(
