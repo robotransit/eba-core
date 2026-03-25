@@ -100,7 +100,9 @@ class TestRegisterDriftAndStreak(unittest.TestCase):
     """register_drift(), clear_streak(), and append-only drift_events."""
 
     def setUp(self) -> None:
-        self.dm = DriftMonitor(config=_config())
+        # drift_warmup_samples=9 ensures the z-score window captures
+        # the stable baseline when testing outlier detection
+        self.dm = DriftMonitor(config=_config(drift_warmup_samples=9))
 
     def test_register_drift_appends_to_drift_events(self) -> None:
         """register_drift() appends to drift_events (append-only)."""
