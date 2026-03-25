@@ -29,6 +29,10 @@ openai = [
 embeddings = [
     "sentence-transformers",
 ]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -39,3 +43,23 @@ path = "eck/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["eck"]
+
+[tool.pytest.ini_options]
+# Strict marker enforcement — unknown markers fail the run
+addopts = "--strict-markers"
+testpaths = ["tests"]
+
+# Test markers (ADR-035)
+# Core markers: blocking, deterministic, stdlib-only
+# Capability marker: non-blocking, may use optional extras
+markers = [
+    "core: deterministic invariant tests (blocking)",
+    "guardrail: ADR-033 no-leakage and authority boundary tests (blocking)",
+    "memory: memory retrieval toggle and equivalence tests (blocking)",
+    "critic: critic parsing, pessimistic failure, severity tests (blocking)",
+    "policy: policy mode irreversibility and gate contract tests (blocking)",
+    "queue: TaskQueue deterministic ordering and overflow tests (blocking)",
+    "confidence: confidence signal EWMA and invariant tests (blocking)",
+    "similarity: similarity retrieval core and fallback tests (blocking)",
+    "capability: optional extras and integration tests (non-blocking)",
+]
