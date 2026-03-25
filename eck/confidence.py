@@ -1,42 +1,36 @@
+# eck/confidence.py
+"""Confidence signal processor (ADR-021–025).
+
+Implements the staged increments for the ECK confidence system:
+- Core state model, raw delta, gated EWMA, bounded accumulation
+- Critic outcome taxonomy + severity scaling (ADR-022)
+- Permission gates + single-cycle failure window (ADR-023)
+- Whitelist of admissible input signals (ADR-024)
+- EWMA update mechanics (ADR-025)
+
+CriticOutcome, PartialStructure, ConflictKind, and ConflictLocus
+are imported from eck.types (single source of truth).
+
+Still deferred:
+- Final observability richness / precise clamp attribution
+- Full optional-signal surface and integration
+"""
+
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import NamedTuple, Optional, Literal
+from typing import Optional
 
+from eck.types import (
+    ConflictKind,
+    ConflictLocus,
+    CriticOutcome,
+    PartialStructure,
+)
 
-class CriticOutcome(NamedTuple):
-    """Locked critic outcome taxonomy per ADR-022.
-
-    This is the canonical set of categories. No other values are permitted.
-    Severity is always in [0.0, 1.0] and acts only as a magnitude scaler.
-    """
-    category: Literal["Success", "Failure", "Partial", "Rejected", "Deferred"]
-    severity: float   # 0.0 ≤ severity ≤ 1.0 (enforced)
-
-
-class ConflictKind(Enum):
-    EVIDENCE_CONFLICT = "evidence_conflict"
-    CONSTRAINT_CONFLICT = "constraint_conflict"
-    DECOMPOSITION_CONFLICT = "decomposition_conflict"
-    RESOLUTION_INSTABILITY = "resolution_instability"
-
-
-class ConflictLocus(Enum):
-    FACTUAL = "factual"
-    INSTRUCTION = "instruction"
-    FORMAT = "format"
-    CONSISTENCY = "consistency"
-    LOCAL = "local"
-    GLOBAL = "global"
-
-
-class PartialStructure(NamedTuple):
-    """Locked structural enrichment for Partial outcomes (interface required)."""
-    collapse_status: Literal["unresolved"]
-    conflict_kind: ConflictKind
-    conflict_footprint: frozenset[ConflictLocus]
+logger = logging.getLogger("eck-core")
 
 
 class MovementClass(Enum):
@@ -53,29 +47,26 @@ _KIND_TO_MOVEMENT_CLASS = {
     ConflictKind.RESOLUTION_INSTABILITY: MovementClass.NEITHER,
 }
 
+# Severity scaling constants for partial delta computation.
+# Low-severity partial (≤ 0.5): small upward nudge, scaled by distance from midpoint.
+# High-severity partial (> 0.5): downward push, scaled more aggressively.
+_PARTIAL_UPWARD_SCALE = 0.5
+_PARTIAL_DOWNWARD_SCALE = 1.2
+_PARTIAL_MIDPOINT = 0.5
+
 
 class ConfidenceSignal:
-    """Core confidence update mechanism with EWMA smoothing.
+    """Core confidence update mechanism with EWMA smoothing (ADR-021–025).
 
-    This file implements the staged increments for ADR-021–025:
-    - Core state model, raw delta, gated EWMA, bounded accumulation
-    - Critic outcome taxonomy + severity scaling
-    - Permission gates + single-cycle failure window
-    - Whitelist of admissible input signals (critic-only for now; optional signals
-      are downward-only and fully disableable with zero phantom influence)
-
-    Still deferred:
-    - Final observability richness / precise clamp attribution (beyond current minimal level)
-    - Full optional-signal surface and integration
-
-    All invariants preserved (stdlib-only, advisory-only confidence, no silent coupling,
-    exact logger "eck-core").
+    Consumes CriticOutcome from eck.types. All category comparisons
+    use lowercase canonical values per eck.types contract.
     """
 
     def __init__(self, alpha: float = 0.3) -> None:
-        """Initialize with per-instance smoothing factor used for replay determinism.
+        """Initialize with per-instance smoothing factor.
 
         alpha must be in (0.0, 1.0] per ADR-025 semantics.
+        Higher alpha = faster adaptation to recent evidence.
         """
         if not (0.0 < alpha <= 1.0):
             raise ValueError(f"alpha must be in (0.0, 1.0], got {alpha}")
@@ -92,46 +83,46 @@ class ConfidenceSignal:
 
     def _compute_raw_delta(self, outcome: CriticOutcome) -> float:
         """Compute raw directional delta from critic outcome (ADR-022/025)."""
-        if outcome.category == "Success":
+        if outcome.category == "success":
             return 0.35 - (0.25 * outcome.severity)
 
-        if outcome.category == "Failure":
+        if outcome.category == "failure":
             return -outcome.severity
 
-        if outcome.category == "Partial":
+        if outcome.category == "partial":
             return self._compute_partial_raw_delta(outcome.severity)
 
-        if outcome.category in ("Rejected", "Deferred"):
+        if outcome.category in ("rejected", "deferred"):
             return 0.0
 
         raise ValueError(f"Unknown critic outcome category: {outcome.category}")
 
     def _compute_partial_raw_delta(self, severity: float) -> float:
-        """Severity-based bidirectional but downward-biased raw delta for Partial."""
-        if severity <= 0.5:
-            return (0.5 - severity) * 0.5
+        """Severity-based bidirectional but downward-biased raw delta for partial."""
+        if severity <= _PARTIAL_MIDPOINT:
+            return (_PARTIAL_MIDPOINT - severity) * _PARTIAL_UPWARD_SCALE
         else:
-            return -(severity - 0.5) * 1.2
+            return -(severity - _PARTIAL_MIDPOINT) * _PARTIAL_DOWNWARD_SCALE
 
     def _derive_base_and_effective_class(
         self,
         outcome: CriticOutcome,
         partial_structure: Optional[PartialStructure],
-        prior_failure_window_active: bool
+        prior_failure_window_active: bool,
     ) -> tuple[MovementClass, MovementClass]:
-        """Derive base_class and effective_class."""
-        if outcome.category == "Partial":
+        """Derive base_class and effective_class (ADR-023)."""
+        if outcome.category == "partial":
             if partial_structure is None:
                 raise ValueError("Partial outcome must be accompanied by PartialStructure")
             base_class = _KIND_TO_MOVEMENT_CLASS[partial_structure.conflict_kind]
         else:
             if partial_structure is not None:
-                raise ValueError("PartialStructure is only valid for Partial outcomes")
+                raise ValueError("PartialStructure is only valid for partial outcomes")
             base_class = MovementClass.BOTH
 
         effective_class = base_class
 
-        # Single-cycle failure window restriction
+        # Single-cycle failure window restriction (ADR-023)
         if prior_failure_window_active:
             if base_class is MovementClass.BOTH:
                 effective_class = MovementClass.DOWN_ONLY
@@ -141,7 +132,7 @@ class ConfidenceSignal:
         return base_class, effective_class
 
     def _apply_gated_clamp(self, delta: float, movement_class: MovementClass) -> float:
-        """Clamp delta according to movement class."""
+        """Clamp delta according to movement class (ADR-023)."""
         if movement_class is MovementClass.BOTH:
             return delta
         if movement_class is MovementClass.UP_ONLY:
@@ -152,65 +143,74 @@ class ConfidenceSignal:
             return 0.0
         raise ValueError("unreachable movement class")
 
-    def update(self, outcome: CriticOutcome, partial_structure: Optional[PartialStructure] = None) -> float:
-        """Core update entrypoint with EWMA smoothing."""
-        # 0. Airtight validation — BEFORE ANY mutation
-        # (category admissibility rejection happens in _compute_raw_delta(); this is accepted deferred hardening)
-        if outcome.category == "Partial":
+    def update(
+        self,
+        outcome: CriticOutcome,
+        partial_structure: Optional[PartialStructure] = None,
+    ) -> float:
+        """Core update entrypoint with EWMA smoothing (ADR-025).
+
+        Returns the new confidence value after applying the update.
+        No update occurs for rejected/deferred outcomes (ADR-021).
+        """
+        # Airtight validation — before any mutation
+        if outcome.category == "partial":
             if partial_structure is None:
                 raise ValueError("Partial outcome must be accompanied by PartialStructure")
         else:
             if partial_structure is not None:
-                raise ValueError("PartialStructure is only valid for Partial outcomes")
+                raise ValueError("PartialStructure is only valid for partial outcomes")
 
         if not (0.0 <= outcome.severity <= 1.0):
             raise ValueError(f"Severity must be in [0.0, 1.0], got {outcome.severity}")
 
-        # Now safe to mutate
+        # Safe to mutate from here
         self._cycle_id += 1
         prior_value = self._value
         prior_smoothed_delta = self._last_smoothed_delta
         prior_failure_window_active = self._last_outcome_was_failure
 
-        # 1. True no-update path for Rejected / Deferred
-        if outcome.category in ("Rejected", "Deferred"):
+        # True no-update path for rejected / deferred (ADR-021)
+        if outcome.category in ("rejected", "deferred"):
             if prior_failure_window_active:
                 self._last_outcome_was_failure = False
             self._logger.info("confidence.update", extra={
                 "cycle_id": self._cycle_id,
-                "timestamp": datetime.now().isoformat(),
                 "category": outcome.category,
                 "severity": outcome.severity,
                 "prior_value": prior_value,
                 "action": "no_update",
                 "failure_window_consumed": prior_failure_window_active,
-                "final_value": self._value
+                "final_value": self._value,
             })
             return self._value
 
-        # 2. Compute raw delta
+        # 1. Compute raw delta
         delta_raw = self._compute_raw_delta(outcome)
 
-        # 3. Derive base and effective movement class
+        # 2. Derive base and effective movement class (ADR-023)
         base_class, effective_class = self._derive_base_and_effective_class(
             outcome, partial_structure, prior_failure_window_active
         )
 
-        # 4. Apply gated clamp to both raw delta and prior smoothed delta
+        # 3. Apply gated clamp to both raw delta and prior smoothed delta
         permitted_raw = self._apply_gated_clamp(delta_raw, effective_class)
         permitted_prior = self._apply_gated_clamp(prior_smoothed_delta, effective_class)
 
-        # 5. Gated EWMA smoothing
-        delta_smoothed = self._alpha * permitted_raw + (1 - self._alpha) * permitted_prior
+        # 4. Gated EWMA smoothing (ADR-025)
+        delta_smoothed = (
+            self._alpha * permitted_raw
+            + (1 - self._alpha) * permitted_prior
+        )
         self._last_smoothed_delta = delta_smoothed
 
-        # 6. Bounded accumulation
+        # 5. Bounded accumulation (ADR-025)
         self._value = max(0.0, min(1.0, self._value + delta_smoothed))
 
-        # 7. Update failure-window state
-        self._last_outcome_was_failure = (outcome.category == "Failure")
+        # 6. Update failure window state (ADR-023)
+        self._last_outcome_was_failure = (outcome.category == "failure")
 
-        # Structured logging (minimal but accurate)
+        # 7. Determine clamp reason for observability
         if permitted_raw != delta_raw or permitted_prior != prior_smoothed_delta:
             if prior_failure_window_active and effective_class != base_class:
                 clamp_reason = "failure_window_clamped"
@@ -225,7 +225,6 @@ class ConfidenceSignal:
 
         self._logger.info("confidence.update", extra={
             "cycle_id": self._cycle_id,
-            "timestamp": datetime.now().isoformat(),
             "category": outcome.category,
             "severity": outcome.severity,
             "prior_value": prior_value,
@@ -238,10 +237,12 @@ class ConfidenceSignal:
             "final_value": self._value,
             "clamp_reason": clamp_reason,
             "partial_structure": {
-                "conflict_kind": partial_structure.conflict_kind.name if partial_structure else None,
-                "conflict_footprint": sorted([locus.name for locus in partial_structure.conflict_footprint]) if partial_structure else None
+                "conflict_kind": partial_structure.conflict_kind.name,
+                "conflict_footprint": sorted([
+                    locus.name for locus in partial_structure.conflict_footprint
+                ]),
             } if partial_structure else None,
-            "admissible_signals": sorted(self._admissible_signals)   # deterministic order
+            "admissible_signals": sorted(self._admissible_signals),
         })
 
         return self._value
@@ -250,22 +251,49 @@ class ConfidenceSignal:
         """Return current confidence value."""
         return self._value
 
-    def replay(self, outcomes: list[tuple[CriticOutcome, Optional[PartialStructure]]]) -> list[float]:
-        """Deterministic replay for testing and auditing."""
+    def replay(
+        self,
+        outcomes: list[tuple[CriticOutcome, Optional[PartialStructure]]],
+    ) -> list[float]:
+        """Deterministic replay for testing and auditing (ADR-025).
+
+        Runs the update sequence against the provided outcomes and returns
+        the confidence trajectory, then restores original state exactly.
+        Logging is suppressed during replay to avoid phantom log entries.
+        """
         original_value = self._value
         original_last_delta = self._last_smoothed_delta
         original_last_failure = self._last_outcome_was_failure
         original_cycle_id = self._cycle_id
 
         trajectory: list[float] = []
-        for outcome, structure in outcomes:
-            self.update(outcome, structure)
-            trajectory.append(self._value)
 
-        # Restore original state
+        # Suppress logging during replay
+        with _suppress_logger(self._logger):
+            for outcome, structure in outcomes:
+                self.update(outcome, structure)
+                trajectory.append(self._value)
+
+        # Restore original state exactly
         self._value = original_value
         self._last_smoothed_delta = original_last_delta
         self._last_outcome_was_failure = original_last_failure
         self._cycle_id = original_cycle_id
+
         return trajectory
-      
+
+
+# ── Logging suppression context manager for replay ───────────────────────────
+
+class _suppress_logger:
+    """Temporarily raise logger level to suppress output during replay."""
+
+    def __init__(self, log: logging.Logger) -> None:
+        self._logger = log
+        self._original_level = log.level
+
+    def __enter__(self) -> None:
+        self._logger.setLevel(logging.CRITICAL + 1)
+
+    def __exit__(self, *_: object) -> None:
+        self._logger.setLevel(self._original_level)
