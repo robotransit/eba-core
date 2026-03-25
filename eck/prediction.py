@@ -3,66 +3,48 @@
 # Prediction must not interpret, parse, or branch on its contents.
 # All semantic interpretation belongs to policy layers only.
 
-from typing import Callable
+from typing import Callable, Any
 
 from .prompts import format_prompt, PREDICTION_PROMPT_TEMPLATE
-from .memory import WorldModel
+from .memory import MemoryRetrieval
 from .config import ECKConfig
 
 
 def build_prediction_context(
     task_text: str,
-    objective: str,
-    memory: WorldModel,
+    objective: str,  # forward seam — may be used by future richer retrieval backends
+    memory: MemoryRetrieval,
     config: ECKConfig,
+    embedding_model: Any | None = None,
 ) -> str:
     """
-    Build optional context from relevant past task outcomes for the prediction prompt.
+    Build optional memory context for the prediction prompt.
 
-    This is read-only: retrieves past tasks but does not modify memory or state.
-    Disabled by default via config.enable_memory_retrieval.
-
+    Delegates entirely to MemoryRetrieval contract (ADR-026–030).
     Returns empty string when disabled or no relevant outcomes found.
+    Memory context is opaque text — must not be interpreted here.
     """
     if not config.enable_memory_retrieval:
         return ""
 
-    similar = memory.retrieve_similar(
-        task_text=task_text,
-        threshold=config.memory_similarity_threshold,
-        limit=config.memory_retrieval_limit,
-        prefer_failures=config.prefer_negative_memory,
+    integration = memory.retrieve(
+        user_input=task_text,
+        embedding_model=embedding_model,
     )
 
-    if not similar:
+    if integration is None:
         return ""
 
-    context_lines = ["Relevant past outcomes:"]
-    for entry in similar:
-        task = entry.get("task", "")[:100]
-        task_str = task if len(task) < 100 else f"{task}..."
-        state = entry.get("state", "unknown")
-        outcome = entry.get("outcome", "(no outcome)")[:100]
-        outcome_str = outcome if len(outcome) < 100 else f"{outcome}..."
-        success = entry.get("success", False)
-        feedback = entry.get("feedback", "(no feedback)")[:100]
-        if len(feedback) == 100:
-            feedback += "..."
-        line = (
-            f"- Task: {task_str} | State: {state} | "
-            f"Outcome: {outcome_str} | Success: {success} | Feedback: {feedback}"
-        )
-        context_lines.append(line)
-
-    return "\n".join(context_lines)
+    return integration.formatted_block
 
 
 def generate_prediction(
     task_text: str,
     objective: str,
     llm_call: Callable[[str], str],
-    memory: WorldModel,
+    memory: MemoryRetrieval,
     config: ECKConfig,
+    embedding_model: Any | None = None,
     max_length: int = 200,
 ) -> str:
     """
@@ -74,7 +56,9 @@ def generate_prediction(
     Memory context is opaque text. Do not interpret here.
     """
     # Build memory context (empty if disabled or no relevant outcomes)
-    memory_context = build_prediction_context(task_text, objective, memory, config)
+    memory_context = build_prediction_context(
+        task_text, objective, memory, config, embedding_model
+    )
 
     prompt = format_prompt(
         PREDICTION_PROMPT_TEMPLATE,
@@ -97,4 +81,3 @@ def generate_prediction(
         raw_prediction = raw_prediction[:max_length].rstrip(" .,!?") + "..."
 
     return raw_prediction
-
