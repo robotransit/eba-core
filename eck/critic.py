@@ -1,8 +1,48 @@
+# eck/critic.py
+"""Critic subsystem (ADR-022–024).
+
+Evaluates task outcomes and returns a categorical CriticOutcome for
+consumption by the confidence signal processor (ADR-025).
+
+Design:
+- LLM reports outcome quality (success/failure) + severity [0.0, 1.0]
+- Kernel derives category (success/partial/failure) from outcome + severity
+- LLM never sees "partial" — category is kernel-controlled
+- All downstream confidence mechanics remain kernel authority
+"""
+
+from __future__ import annotations
+
 import json
 import logging
-from typing import Tuple, Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 logger = logging.getLogger("eck-core")
+
+# Severity floor below which a failure is promoted to partial (ADR-022).
+# Configurable — default 0.5. Above this: failure category.
+# Below this: partial category (both confidence directions permitted,
+# no failure window triggered).
+_DEFAULT_PARTIAL_THRESHOLD = 0.5
+
+
+class CriticOutcome(NamedTuple):
+    """
+    Typed output of critic evaluation (ADR-022).
+
+    category: kernel-derived outcome category
+        "success"  — result met constraints; upward confidence permitted
+        "partial"  — low-severity failure; both directions permitted, no failure window
+        "failure"  — hard constraint violation; downward + failure window triggered
+        "rejected" — no execution occurred; no confidence update (ADR-021)
+    severity: float [0.0, 1.0] — scales magnitude of confidence delta within category
+    feedback: human-readable explanation from critic
+    success: convenience bool — True only when category == "success"
+    """
+    category: str
+    severity: float
+    feedback: str
+    success: bool
 
 
 def critic_evaluate(
@@ -13,74 +53,206 @@ def critic_evaluate(
     llm_call: Callable[[str], str],
     enable_cross_validation: bool = True,
     verifier_callback: Optional[Callable[[str, str], bool]] = None,
-) -> Tuple[bool, str, float]:
+    partial_threshold: float = _DEFAULT_PARTIAL_THRESHOLD,
+) -> CriticOutcome:
     """
-    Evaluate task result using critic prompt with consensus and optional verification.
+    Evaluate task result and return a typed CriticOutcome (ADR-022).
+
+    The LLM reports outcome quality (success/failure) and severity.
+    The kernel derives the final category — the LLM never controls
+    failure window suppression or confidence gate semantics directly.
+
+    Cross-validation disagreement maps to severity=1.0 within the
+    first call's outcome category (ADR-022 invariant).
+
+    Pessimistic fallback on any parse failure: failure category,
+    severity=1.0 (ADR-022 refusal-over-fabrication posture).
 
     Args:
         task_text: The task description.
         prediction: Predicted outcome.
         result: Actual execution outcome.
         objective: Overall goal.
-        llm_call: Callable that takes prompt and returns LLM response string.
-        enable_cross_validation: If True, use dual critic calls for consensus (default True).
-        verifier_callback: Optional callback for external verification (e.g. tool result check).
+        llm_call: Callable that takes a prompt and returns an LLM response.
+        enable_cross_validation: If True, use dual critic calls for consensus.
+        verifier_callback: Optional external verification hook.
+        partial_threshold: Severity floor below which failure → partial category.
 
     Returns:
-        Tuple[bool, str, float]: (final_success, feedback, error_score)
-        - error_score is float 0.0-1.0 (0.0 = perfect alignment, 1.0 = failure)
+        CriticOutcome with category, severity, feedback, and success flag.
     """
-    prompt = f"""
-Evaluate the result against the task and objective.
+    prompt = _build_prompt(task_text, prediction, result, objective)
+
+    # First critic call
+    raw1 = llm_call(prompt)
+    outcome1, severity1, feedback1 = _parse_critic_response(raw1)
+
+    if not enable_cross_validation:
+        category = _derive_category(outcome1, severity1, partial_threshold)
+        final_severity = _clamp(severity1)
+        final_feedback = feedback1
+        final_outcome = outcome1
+    else:
+        # Second critic call for consensus
+        raw2 = llm_call(prompt)
+        outcome2, severity2, feedback2 = _parse_critic_response(raw2)
+
+        if outcome1 != outcome2:
+            # Disagreement: severity clamped to 1.0, category from first call (ADR-022)
+            logger.warning(
+                "Critic disagreement detected",
+                extra={
+                    "outcome1": outcome1,
+                    "outcome2": outcome2,
+                    "severity1": severity1,
+                    "severity2": severity2,
+                },
+            )
+            final_outcome = outcome1
+            final_severity = 1.0
+            final_feedback = f"{feedback1} | Disagreement: {feedback2}"
+        else:
+            # Consensus: average severity, combine feedback
+            final_outcome = outcome1
+            final_severity = _clamp((severity1 + severity2) / 2.0)
+            final_feedback = f"{feedback1} | Consensus: {feedback2}"
+
+        category = _derive_category(final_outcome, final_severity, partial_threshold)
+
+    # Optional external verification hook — can demote to failure (ADR-022)
+    if verifier_callback is not None:
+        if not verifier_callback(task_text, result):
+            category = "failure"
+            final_severity = 1.0
+            final_feedback += " | External verification failed"
+            logger.info(
+                "External verifier demoted outcome to failure",
+                extra={
+                    "task_text": task_text[:80],
+                    "prior_category": category,
+                },
+            )
+
+    logger.info(
+        "Critic outcome",
+        extra={
+            "category": category,
+            "severity": final_severity,
+            "cross_validation": enable_cross_validation,
+        },
+    )
+
+    return CriticOutcome(
+        category=category,
+        severity=final_severity,
+        feedback=final_feedback,
+        success=(category == "success"),
+    )
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _build_prompt(
+    task_text: str,
+    prediction: str,
+    result: str,
+    objective: str,
+) -> str:
+    """
+    Build the critic evaluation prompt.
+
+    Asks for outcome quality (success/failure) and severity only.
+    Does not mention 'partial' — category derivation is kernel-controlled.
+    """
+    return f"""Evaluate the result against the task and objective.
 
 Task: {task_text}
 Prediction: {prediction}
 Result: {result}
 Objective: {objective}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON with exactly these fields:
 {{
-  "success": true/false,
-  "feedback": "brief explanation"
+  "outcome": "success" or "failure",
+  "severity": <float 0.0 to 1.0>,
+  "feedback": "<brief explanation>"
 }}
 
-Respond with true if the result meaningfully advances the objective.
+severity meaning:
+  0.0 = perfect alignment or trivial issue
+  1.0 = complete failure or critical constraint violation
+  Use values in between to indicate degree.
+
+outcome meaning:
+  "success" = result meaningfully advances the objective
+  "failure" = result does not meet required constraints
+
+Respond with valid JSON only. No other text.
 """
 
-    # First critic call
-    response1 = llm_call(prompt)
-    success1, feedback1 = _parse_critic_response(response1)
 
-    if not enable_cross_validation:
-        error = 1.0 if not success1 else 0.0
-        return success1, feedback1, error
+def _parse_critic_response(response: str) -> tuple[str, float, str]:
+    """
+    Parse critic JSON response.
 
-    # Second critic call for consensus
-    response2 = llm_call(prompt)
-    success2, feedback2 = _parse_critic_response(response2)
-
-    final_success = success1 and success2
-    final_feedback = f"{feedback1} | Consensus: {success2}"
-
-    if success1 != success2:
-        logger.warning("Critic disagreement detected - potential instability")
-
-    # Optional external verification hook
-    if verifier_callback is not None:
-        if not verifier_callback(task_text, result):
-            final_success = False
-            final_feedback += " | External verification failed"
-
-    error = 1.0 if not final_success else 0.0
-    return final_success, final_feedback, error
-
-
-def _parse_critic_response(response: str) -> Tuple[bool, str]:
-    """Parse critic JSON response. Pessimistic fallback on failure."""
+    Returns (outcome, severity, feedback).
+    Pessimistic fallback on any parse failure: failure, severity=1.0.
+    """
     try:
         data = json.loads(response.strip())
-        return bool(data.get("success", False)), str(data.get("feedback", "No feedback"))
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("Critic JSON parse failed - defaulting to failure (pessimistic)")
-        return False, "Parse failed - treated as non-success"
 
+        outcome = str(data.get("outcome", "failure")).strip().lower()
+        if outcome not in ("success", "failure"):
+            logger.warning(
+                "Critic returned unrecognised outcome — defaulting to failure",
+                extra={"outcome": outcome},
+            )
+            outcome = "failure"
+
+        raw_severity = data.get("severity", 1.0)
+        try:
+            severity = _clamp(float(raw_severity))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Critic severity unparseable — defaulting to 1.0",
+                extra={"raw_severity": str(raw_severity)},
+            )
+            severity = 1.0
+
+        feedback = str(data.get("feedback", "No feedback")).strip()
+        if not feedback:
+            feedback = "No feedback"
+
+        return outcome, severity, feedback
+
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            "Critic JSON parse failed — pessimistic failure (ADR-022)",
+            extra={"response_preview": response[:80] if response else ""},
+        )
+        return "failure", 1.0, "Parse failed — treated as failure"
+
+
+def _derive_category(
+    outcome: str,
+    severity: float,
+    partial_threshold: float,
+) -> str:
+    """
+    Derive ADR-022 category from LLM-reported outcome and severity.
+
+    success  → "success" (kernel gate: upward permitted)
+    failure + severity < partial_threshold → "partial" (both directions, no failure window)
+    failure + severity >= partial_threshold → "failure" (downward + failure window)
+    """
+    if outcome == "success":
+        return "success"
+    # outcome == "failure"
+    if severity < partial_threshold:
+        return "partial"
+    return "failure"
+
+
+def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Clamp a float to [lo, hi]."""
+    return max(lo, min(hi, value))
