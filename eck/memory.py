@@ -10,6 +10,12 @@ from typing import Any, NamedTuple, Optional, Sequence, Tuple
 
 logger = logging.getLogger("eck-core")
 
+# Sentinel strings used as block delimiters in format_memory_context.
+# Defined as constants so sanitisation and formatting use the same values.
+_SENTINEL_BEGIN = "=== BEGIN MEMORY CONTEXT ==="
+_SENTINEL_END = "=== END MEMORY CONTEXT ==="
+_SENTINEL_REPLACEMENT = "[MEMORY CONTEXT]"
+
 
 class TaskRecord(NamedTuple):
     """Concrete immutable record for mock WorldModel-backed retrieval (provisional)."""
@@ -96,6 +102,21 @@ class MemoryRetrieval:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    @staticmethod
+    def _sanitise_field(value: str) -> str:
+        """
+        Sanitise a field value for safe embedding in the memory context block.
+
+        - Collapses newlines and carriage returns to single space
+        - Replaces sentinel strings with a neutral placeholder to prevent
+          structural corruption of the memory context block (ADR-026/028)
+        """
+        value = value.strip()
+        value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+        value = value.replace(_SENTINEL_BEGIN, _SENTINEL_REPLACEMENT)
+        value = value.replace(_SENTINEL_END, _SENTINEL_REPLACEMENT)
+        return value
+
     def integrate_retrieval(self, execution: Optional[RetrievalExecution]) -> Optional[RetrievalIntegration]:
         """Phase 4: Produce canonical prompt block (or None if disabled/empty).
 
@@ -120,19 +141,21 @@ class MemoryRetrieval:
         - Fixed sentinels + single-line fields
         - Preserves input order exactly
         - No trailing newline after footer
+        - Sentinel strings in field content are replaced with a neutral
+          placeholder to preserve block structural integrity (ADR-028)
         """
         if not records:
             return ""
 
         lines: list[str] = [
-            "=== BEGIN MEMORY CONTEXT ===",
+            _SENTINEL_BEGIN,
             "Order: most recent first",
             "",
         ]
 
         for i, rec in enumerate(records, start=1):
-            task_id = str(rec.task_id).strip().replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
-            description = rec.description.strip().replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+            task_id = self._sanitise_field(str(rec.task_id))
+            description = self._sanitise_field(rec.description)
             outcome = ("Completed" if rec.completed else "Pending").strip()
             timestamp_str = self._format_timestamp(rec.created_at)
 
@@ -149,7 +172,7 @@ class MemoryRetrieval:
         if lines[-1] == "":
             lines.pop()
 
-        lines.append("=== END MEMORY CONTEXT ===")
+        lines.append(_SENTINEL_END)
 
         return "\n".join(lines)
 
@@ -208,10 +231,13 @@ class MemoryRetrieval:
             integration = self.integrate_retrieval(execution)
             context_length = integration.context_length if integration else 0
         finally:
-            self.log_observability(
-                enabled=True,
-                item_count=item_count,
-                context_length=context_length
-            )
+            try:
+                self.log_observability(
+                    enabled=True,
+                    item_count=item_count,
+                    context_length=context_length,
+                )
+            except Exception:
+                pass  # Logging failure must never halt execution (ADR-029)
 
         return integration
