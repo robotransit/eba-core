@@ -45,6 +45,19 @@ class ECKConfig:
     error_z_threshold: float = 3.0
     max_drift_streak: int = 3
 
+    # Number of error samples required before z-score signal activates.
+    # During warmup, record_error() always returns False.
+    drift_warmup_samples: int = 10
+
+    # Total drift event count above which severe() returns True.
+    severe_drift_count: int = 3
+
+    # Consecutive drift streak length triggering GUIDED mode recommendation.
+    guided_drift_threshold: int = 1
+
+    # Consecutive drift streak length triggering ENFORCED mode recommendation.
+    enforced_drift_threshold: int = 2
+
     # ── Feasibility and confidence ────────────────────────────────────
     feas_conf_high: float = 0.8
     feas_conf_low: float = 0.5
