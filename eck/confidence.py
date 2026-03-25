@@ -19,7 +19,6 @@ Still deferred:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from enum import Enum
 from typing import Optional
 
@@ -173,7 +172,12 @@ class ConfidenceSignal:
         # True no-update path for rejected / deferred (ADR-021)
         if outcome.category in ("rejected", "deferred"):
             if prior_failure_window_active:
+                # Consume the failure window — clear both the window flag and
+                # the negative momentum carried by _last_smoothed_delta.
+                # No new evidence was produced, so the downward carry from the
+                # prior failure should not persist past window consumption.
                 self._last_outcome_was_failure = False
+                self._last_smoothed_delta = 0.0
             self._logger.info("confidence.update", extra={
                 "cycle_id": self._cycle_id,
                 "category": outcome.category,
