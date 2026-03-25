@@ -8,6 +8,8 @@ from dataclasses import replace
 from .queue import TaskQueue, QueueFullError
 from .memory import MemoryRetrieval
 from .drift import DriftMonitor
+from .confidence import ConfidenceSignal
+from .types import CriticOutcome
 from .utils import (
     generate_id,
     is_numeric_feasible,
@@ -57,10 +59,10 @@ class ECKAgent:
         # Current active policy mode (derived from config)
         self.current_policy_mode: PolicyMode = self.config.policy_mode
 
-        # Current confidence (placeholder — future: rolling signal)
-        # NOTE: Replace with ConfidenceSignal(alpha=self.config.confidence_alpha)
-        # when ADR-021–025 wiring is complete.
-        self.current_confidence: float = 0.5
+        # Confidence signal processor (ADR-021–025)
+        self._confidence: ConfidenceSignal = ConfidenceSignal(
+            alpha=self.config.confidence_alpha
+        )
 
         self.queue = TaskQueue(max_size=self.config.max_queue_size)
 
@@ -162,7 +164,7 @@ class ECKAgent:
 
         # 2. Execution (policy-gated)
         recommended_breadth = get_recommended_breadth(
-            confidence=self.current_confidence,
+            confidence=self._confidence.get_value(),
             policy_mode=self.current_policy_mode,
         )
 
@@ -175,17 +177,12 @@ class ECKAgent:
                     "task_id": task_id,
                     "policy_mode": self.current_policy_mode.name,
                     "recommendation": recommended_breadth,
-                    "confidence": self.current_confidence,
+                    "confidence": self._confidence.get_value(),
                 },
             )
             outcome = ""
 
         # 3. Critic (ADR-022)
-        # NOTE:
-        # critic_outcome.severity feeds DriftMonitor as the error signal
-        # until the confidence signal processor (ADR-021–025) is wired —
-        # at which point critic_outcome will be passed directly to
-        # ConfidenceSignalProcessor.update() instead.
         critic_outcome = critic_evaluate(
             task_text=task_text,
             prediction=prediction,
@@ -207,6 +204,28 @@ class ECKAgent:
                 "success": critic_outcome.success,
             },
         )
+
+        # Confidence update (ADR-021–025)
+        # NOTE:
+        # Partial outcomes require a PartialStructure (ConflictKind + ConflictLocus)
+        # which the critic does not currently produce. Partial outcomes are skipped
+        # here — epistemically conservative, not wrong. A follow-on commit must
+        # extend critic_evaluate() to produce PartialStructure alongside partial
+        # outcomes, at which point the guard below can be removed.
+        # TODO: derive PartialStructure from critic_outcome and pass it here.
+        if critic_outcome.category != "partial":
+            prior_confidence = self._confidence.get_value()
+            new_confidence = self._confidence.update(critic_outcome)
+            logger.info(
+                "Confidence updated",
+                extra={
+                    "task_id": task_id,
+                    "category": critic_outcome.category,
+                    "prior_confidence": round(prior_confidence, 4),
+                    "new_confidence": round(new_confidence, 4),
+                    "failure_window_active": self._confidence._last_outcome_was_failure,
+                },
+            )
 
         # 4. Drift tracking (append-only, no reset — ADR-040)
         perceptual_drift = self.drift.record_error(error)
