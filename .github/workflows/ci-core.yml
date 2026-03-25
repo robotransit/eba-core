@@ -42,7 +42,6 @@ jobs:
       - name: Run deterministic core tests
         run: |
           pytest \
-            -m "core or guardrail or memory or critic or policy or queue or confidence or similarity" \
             --cov=eck \
             --cov-report=xml \
             --cov-report=html \
