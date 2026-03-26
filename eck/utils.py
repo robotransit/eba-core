@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import uuid
 from typing import Any, List
 
-from .config import ECKConfig, PolicyMode
+from .config import PolicyMode
 
 logger = logging.getLogger("eck-core")
 
@@ -105,8 +104,8 @@ def is_numeric_feasible(
         if not pred_str or not act_str:
             return False
         return abs(len(pred_str) - len(act_str)) <= 50
-    except Exception:  # pragma: no cover
-        return False
+    except Exception:
+        return False  # pragma: no cover
 
 
 # ── Pre-gate execution utilities (temporary — pending ADR-038 wiring) ─────────
