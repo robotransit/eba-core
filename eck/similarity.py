@@ -26,7 +26,7 @@ def _get_np() -> Any | None:
         return None
 
     if _np is None:
-        try:
+        try:  # pragma: no cover
             import numpy as np
             _np = np
         except Exception:
@@ -67,7 +67,7 @@ def retrieve_scored(
     return _core_retrieve_scored(tasks, limit)
 
 
-# ── Core stdlib-only implementation (always used in fallback) ────────────────────────────────
+# ── Core stdlib-only implementation (always used in fallback) ─────────────────
 
 def _core_retrieve_similar(
     tasks: Sequence[TaskRecord],
@@ -100,9 +100,10 @@ def _core_retrieve_scored(
     return result
 
 
-# ── Private helper for cosine score ───────────────────────────────────────────────────────
+# ── Private helper for cosine score ──────────────────────────────────────────
+# pragma: no cover — requires numpy (optional extras, capability layer only)
 
-def _cosine_score(query_emb, task_emb, np) -> float:
+def _cosine_score(query_emb, task_emb, np) -> float:  # pragma: no cover
     """Compute cosine similarity with zero-norm guard."""
     norm_q = np.linalg.norm(query_emb)
     norm_t = np.linalg.norm(task_emb)
@@ -111,9 +112,11 @@ def _cosine_score(query_emb, task_emb, np) -> float:
     return float(np.dot(query_emb, task_emb) / (norm_q * norm_t))
 
 
-# ── Optional cosine path (wired from ECKAgent) ─────────────────────────────────────
+# ── Optional cosine path (wired from ECKAgent) ────────────────────────────────
+# These functions require sentence-transformers and numpy (optional extras).
+# They are excluded from core CI coverage and tested in the capability layer.
 
-def _optional_retrieve_similar(
+def _optional_retrieve_similar(  # pragma: no cover
     tasks: Sequence[TaskRecord],
     query_embedding: Optional[Any],
     limit: int,
@@ -128,6 +131,9 @@ def _optional_retrieve_similar(
     In the current integration, query_embedding is treated as query text and
     encoded within this function. Future revisions may pass a precomputed
     embedding instead, but this does not affect current behavior.
+
+    Excluded from core CI coverage — requires optional extras (ADR-032).
+    Tested in capability layer.
     """
     if embedding_model is None or query_embedding is None:
         return _core_retrieve_similar(tasks, limit)
@@ -174,7 +180,7 @@ def _optional_retrieve_similar(
         return _core_retrieve_similar(tasks, limit)
 
 
-def _optional_retrieve_scored(
+def _optional_retrieve_scored(  # pragma: no cover
     tasks: Sequence[TaskRecord],
     query_embedding: Optional[Any],
     limit: int,
@@ -188,6 +194,9 @@ def _optional_retrieve_scored(
     In the current integration, query_embedding is treated as query text and
     encoded within this function. Future revisions may pass a precomputed
     embedding instead, but this does not affect current behavior.
+
+    Excluded from core CI coverage — requires optional extras (ADR-032).
+    Tested in capability layer.
     """
     if embedding_model is None or query_embedding is None:
         return _core_retrieve_scored(tasks, limit)
