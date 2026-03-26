@@ -18,10 +18,12 @@ All significant architectural decisions are recorded in the [Architecture Decisi
 At runtime, the ECK executes a deterministic agent loop in which:
 
 1. Tasks or actions are proposed or generated.
-2. A critic evaluates outcomes or intermediate results.
-3. Epistemic signals (such as confidence) are updated according to explicit rules.
+2. A critic evaluates outcomes and returns a typed `CriticOutcome` plus optional `PartialStructure`.
+3. Epistemic signals (confidence) are updated according to explicit rules — including partial outcomes via kernel-normalised `PartialStructure`.
 4. The policy gate evaluates proposed actions against epistemic state and returns an execution mode.
 5. The agent loop enforces that decision before any execution occurs.
+6. Drift is tracked append-only; the periodic guard checks for severe instability and halts if detected.
+7. The goal completion predicate is evaluated deterministically — success, natural queue exhaustion, and confidence threshold must all be satisfied simultaneously.
 
 This establishes a strict separation between decision (policy gate) and enforcement (agent loop).
 
@@ -45,13 +47,21 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 - **Optional Capability Layers**  
   Advanced features must remain optional (via toggles or extras) and must not introduce mandatory dependencies, runtime coupling, or non-determinism into the core.
 
+- **Monotonic Safety**  
+  Policy mode upgrades are irreversible. Drift evidence is append-only. Severe instability halts via a single configurable enforcement seam — no internal recovery, no silent reset.
+
+- **Epistemic Seriousness**  
+  The confidence signal is updated on every cycle including partial outcomes. The critic never controls confidence dynamics directly — category derivation and PartialStructure normalisation are kernel authority. The LLM proposes bounded evidence; the kernel classifies and owns consequences.
+
 ## Safety Boundaries ("Must Never Happen")
 
-- No new authority surfaces through memory, prompts, similarity, or other capability layers  
-- No silent coupling: signals must not alter behavior without explicit policy gate mediation  
-- No dependency creep: the core package must remain stdlib-only  
-- No prompt drift when retrieval is disabled (bit-for-bit prompt identity)  
+- No new authority surfaces through memory, prompts, similarity, or other capability layers
+- No silent coupling: signals must not alter behavior without explicit policy gate mediation
+- No dependency creep: the core package must remain stdlib-only
+- No prompt drift when retrieval is disabled (bit-for-bit prompt identity)
 - No split-brain state: new state variables must have a single source of truth and deterministic tests
+- No LLM authority over lifecycle decisions (goal completion, halt, policy mode)
+- No internal recovery from severe instability — halt is the only response
 
 ## Core vs Optional Capabilities
 
@@ -62,6 +72,10 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 - Stdlib-only operation
 - Policy Gate contract and default control mediation
 - Agent loop enforcement of policy gate decisions
+- Confidence signal processor (EWMA, failure window, partial outcomes)
+- Critic outcome taxonomy and PartialStructure derivation
+- Drift monitoring and periodic guard
+- Goal completion predicate
 
 **Optional** (behind explicit toggles or extras):
 - Embedding-based similarity
@@ -70,7 +84,7 @@ This model ensures that cognition-like capabilities remain advisory while the ke
 
 ## v0.2.0 Architecture Sequence
 
-The v0.2.0 architecture is defined through the ADR set ADR-020 through ADR-039.
+The v0.2.0 architecture is defined through the ADR set ADR-020 through ADR-041.
 
 ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architecture. The subsequent ADRs are grouped by subsystem for readability.
 
@@ -85,6 +99,8 @@ ADR-020 establishes the roadmap and ordering constraints for the v0.2.0 architec
 
 The ECK confidence system is a deterministic, non-authoritative epistemic signal processor with strict kernel-enforced invariants (ADR-021–025).
 
+The confidence signal is updated on every cycle via `ConfidenceSignal.update()`, which accepts a `CriticOutcome` and optional `PartialStructure`. For partial outcomes, `PartialStructure` (derived by the kernel from bounded LLM fields) determines the permitted movement class. Non-partial outcomes use `MovementClass.BOTH` by default.
+
 See the formal specification for full invariants and system model:
 
 → [docs/confidence-signal-formal.md](docs/confidence-signal-formal.md)
@@ -92,7 +108,7 @@ See the formal specification for full invariants and system model:
 **Policy Gate**
 - [ADR-038 — Policy Gate Contract – Exclusive Consumer of Epistemic Signals](docs/adr/ADR-038.md)
 
-#### Policy Gate (New Subsystem)
+#### Policy Gate (PR2 Implementation)
 
 The policy gate is the exclusive consumer of confidence for control decisions and the sole pre-execution mediation layer between epistemic state and execution. It enforces strict invariants including purity, determinism, side-effect freedom, monotonicity, and explicit default semantics. The policy gate is a pure, referentially transparent function of (proposed_action, confidence, context).
 
@@ -105,7 +121,7 @@ See the ADR for full contract details and invariants:
 
 #### Agent Loop Enforcement (PR3 Implementation)
 
-The agent loop is the runtime enforcement seam for policy gate decisions.  
+The agent loop is the runtime enforcement seam for policy gate decisions.
 It ensures no execution occurs without prior gate authorization and that HALT, RETRY, and DEGRADE outcomes prevent execution of the current proposal.
 
 See the ADR for full enforcement details and invariants:
@@ -131,6 +147,26 @@ See the ADR for full enforcement details and invariants:
 - [ADR-035 — GitHub Actions CI Workflow Implementation](docs/adr/ADR-035.md)
 - [ADR-036 — Test Coverage & Invariant Enforcement Metrics](docs/adr/ADR-036.md)
 - [ADR-037 — CI Observability & Logging](docs/adr/ADR-037.md)
+
+**Drift Monitoring and Goal Completion**
+- [ADR-040 — Drift Monitor Semantics](docs/adr/ADR-040.md)
+- [ADR-041 — Goal Completion Predicate](docs/adr/ADR-041.md)
+
+#### ECK Core Kernel Reconciliation (PR8 Implementation)
+
+The v0.2.0 kernel reconciliation completes the epistemic control loop end-to-end.
+
+**Drift monitoring (ADR-040):**  
+Drift evidence is append-only — no resets of history. Derived state (streak) may be cleared. Two independent halt conditions: streak-based halt and severe instability halt. Severe instability is enforced via a single periodic guard seam (`guard_interval=1` default delivers per-cycle semantics; increase for explicit grace period). No internal recovery — halt is the only response to severe instability.
+
+**Goal completion predicate (ADR-041):**  
+Goal completion is a deterministic kernel predicate requiring all three conditions simultaneously: critic success, natural queue exhaustion (not policy-suppressed), and confidence ≥ threshold. The `subtasks_suppressed` flag disambiguates queue empty due to policy suppression from genuine completion. The LLM has no authority over this decision.
+
+**PartialStructure derivation:**  
+The critic derives authoritative `PartialStructure` from bounded LLM fields (`conflict_kind`, `conflict_footprint`). The kernel normalises to closed enum vocabulary with deterministic fallbacks (`RESOLUTION_INSTABILITY` + `{LOCAL}`). `PartialStructure` exists if and only if `category == "partial"`. Partial confidence updates are now fully active.
+
+**Critic disagreement semantics:**  
+Disagreement is detected at the derived-category level, not raw outcome token level. Disagreement escalates severity to 1.0 but preserves the category from the first call. A would-be partial outcome stays partial even under disagreement.
 
 ## Relationship to ADRs
 
