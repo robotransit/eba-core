@@ -1,5 +1,5 @@
 # TODO
-**Last updated:** 2026-03-26
+**Last updated:** 2026-03-27
 **Current design baseline:** v0.2.0 (architecture & invariants locked)
 **Current implementation state:** v0.2.0 complete
 
@@ -25,7 +25,7 @@ for the full ADR-mapped completion record.
 
 ---
 
-## v0.3.0 Roadmap
+## v0.3.0 Roadmap — Complete and Harden the Architecture
 
 ### 1. Formal Model (TLA⁺ or Alloy)
 
@@ -36,8 +36,7 @@ Before hardening the execution surface, build a small formal model capturing:
   policy escalation is irreversible
 
 Model-check these properties before writing the corresponding code.
-This is the correct sequencing — the model's assumptions become the ADR's
-invariants, not the other way around.
+The model's assumptions become the ADR's invariants — correct sequencing.
 
 ### 2. Execution Surface — propose/authorize/perform (ADR required)
 
@@ -84,6 +83,40 @@ If deployment context demands it:
 
 This step is appropriate before any safety-critical domain deployment.
 Not required for v0.3.0 initial release.
+
+---
+
+## v0.4.0 Roadmap — Characterise and Validate
+
+v0.4.0 is the empirical validation phase. Meaningful benchmarking requires
+a real execution surface — the propose/authorize/perform work in v0.3.0 is
+a prerequisite. Benchmarking against the current stub would tell us nothing.
+
+### 1. Empirical Benchmarking
+
+- Task success rate with ECK vs without ECK on equivalent task sets
+- Confidence trajectory analysis — does confidence stabilise, drift, or
+  oscillate across a run? Does it correlate with actual task quality?
+- Halt correlation — do kernel halts correspond to genuine task failure?
+- Critic category distribution — how often does partial vs success vs failure
+  occur on real tasks with real LLMs?
+- Parameter sensitivity — effect of varying `partial_threshold`,
+  `guard_interval`, `confidence_alpha` on run length and goal completion rate
+
+### 2. Behavioural Characterisation
+
+- Does ECK make the system appear more calibrated to an external observer?
+- Ablation studies — isolate the contribution of each kernel subsystem
+  (confidence signal, drift monitor, partial outcomes, goal predicate)
+- Comparison baseline: same LLM, same tasks, ECK wrapped vs unwrapped
+
+### 3. Publish Findings
+
+- Convert empirical results into a technical report or paper
+- "ECK demonstrably improves task reliability and reduces harmful actions
+  by X%" is the evidenced claim that supports domain operator adoption
+- This is the work that turns ECK from an architectural claim into a
+  validated one
 
 ---
 
