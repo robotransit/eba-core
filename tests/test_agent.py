@@ -247,6 +247,8 @@ class TestGoalCompletion(unittest.TestCase):
              patch.object(agent_mod, "execute_task", return_value="outcome"), \
              patch.object(agent_mod, "critic_evaluate",
                           return_value=_make_critic_outcome_success()), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "severe", return_value=False), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]):
             a.seed("x")
             result = a.step()
@@ -269,6 +271,8 @@ class TestGoalCompletion(unittest.TestCase):
              patch.object(agent_mod, "execute_task", return_value="outcome"), \
              patch.object(agent_mod, "critic_evaluate",
                           return_value=_make_critic_outcome_success()), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "severe", return_value=False), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]):
             a.seed("x")
             result = a.step()
