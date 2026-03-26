@@ -105,7 +105,7 @@ def is_numeric_feasible(
         if not pred_str or not act_str:
             return False
         return abs(len(pred_str) - len(act_str)) <= 50
-    except Exception:
+    except Exception:  # pragma: no cover
         return False
 
 
