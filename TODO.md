@@ -25,9 +25,70 @@ for the full ADR-mapped completion record.
 
 ---
 
-## Future Work (v0.3.0 and beyond)
+## v0.3.0 Roadmap
 
-**High priority (post-v0.2.0)**
+### 1. Formal Model (TLA⁺ or Alloy)
+
+Before hardening the execution surface, build a small formal model capturing:
+- The agent step loop and policy mode state transitions
+- The propose/authorize/perform separation
+- Core safety properties: no unauthorized action, HALT stops all side effects,
+  policy escalation is irreversible
+
+Model-check these properties before writing the corresponding code.
+This is the correct sequencing — the model's assumptions become the ADR's
+invariants, not the other way around.
+
+### 2. Execution Surface — propose/authorize/perform (ADR required)
+
+`execute_task` is currently a stub. In production integrations it will perform
+real effects (API calls, file writes, code execution). The kernel currently has
+no authorization boundary between "LLM proposes an action" and "action is
+performed." This is the primary remaining architectural gap.
+
+Required work:
+- New ADR defining the propose/authorize/perform contract
+- Split `execute_task` into:
+  - `propose_execution(task_text, llm_call)` → `ProposedAction` (advisory, structured)
+  - `authorize_and_perform(proposed_action)` → outcome (kernel-enforced, policy-gated)
+- `authorize_and_perform` enforces: policy-mode checks, whitelists, provenance,
+  rate limits. Only this function may perform external effects.
+- Runtime assertions mapping to model assumptions
+
+### 3. Property Testing and Static Analysis
+
+Can begin in parallel with steps 1 and 2.
+
+- **Hypothesis** — property-based testing for deterministic kernel functions:
+  confidence signal bounds, drift monitor monotonicity, critic normalisation
+  exhaustiveness, PartialStructure derivation for arbitrary inputs
+- **mypy** — strict type checking; add to CI initially as non-blocking
+- **CodeQL** — enable on repo (free for public repos via GitHub)
+- **icontract** — runtime contract enforcement making ADR invariant violations
+  fail-fast in development
+
+### 4. Domain-Specific PolicyGate Implementations
+
+`DefaultPolicyGate` is a bootstrapping placeholder with fixed thresholds and
+no domain awareness. `PolicyContext` fields (`environment`, `safety_level`) and
+`proposed_action` are currently uninterpreted. Future work includes
+domain-specific subclasses that interpret these fields and apply
+domain-appropriate rule sets.
+
+### 5. Formal Verification (if higher assurance required)
+
+If deployment context demands it:
+- Commission formal verification of `authorize_and_perform` (Dafny or Coq)
+- External security audit of the kernel TCB boundary
+- TLA⁺ model extension to cover the full authorized execution surface
+
+This step is appropriate before any safety-critical domain deployment.
+Not required for v0.3.0 initial release.
+
+---
+
+## Additional Future Work
+
 - Add comprehensive end-to-end examples and usage patterns
 - Expand policy mode examples and dynamic switching guidance
 - Benchmark TaskQueue and memory retrieval at scale
@@ -39,11 +100,6 @@ for the full ADR-mapped completion record.
 - ADR-038 full wiring — get_recommended_breadth() and should_execute() in
   utils.py are pre-gate utilities pending retirement once PolicyGate is the
   sole execution authority
-
-**Medium / Low priority**
-- Add CONTRIBUTING.md, issue templates, and clearer contribution guidelines
-- Consider optional performance optimisations (only after v0.2.0 is stable)
-- Further formal verification experiments (TLA⁺ / model checking of the kernel)
 
 ---
 
