@@ -18,13 +18,13 @@ def dummy_llm(prompt: str) -> str:
 
 
 def _make_critic_outcome_success():
-    """Return a CriticOutcome representing a successful evaluation."""
-    return make_critic_outcome(category="success", severity=0.1, feedback="ok")
+    """Return a (CriticOutcome, None) tuple representing a successful evaluation."""
+    return (make_critic_outcome(category="success", severity=0.1, feedback="ok"), None)
 
 
 def _make_critic_outcome_failure():
-    """Return a CriticOutcome representing a failed evaluation."""
-    return make_critic_outcome(category="failure", severity=0.8, feedback="fail")
+    """Return a (CriticOutcome, None) tuple representing a failed evaluation."""
+    return (make_critic_outcome(category="failure", severity=0.8, feedback="fail"), None)
 
 
 class TestAgentHaltAndDeferred(unittest.TestCase):
