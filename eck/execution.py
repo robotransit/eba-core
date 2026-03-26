@@ -1,3 +1,4 @@
+# eck/execution.py
 from typing import Callable
 import re
 import ast
@@ -15,7 +16,7 @@ def _safe_eval(expr: str) -> float:
     """Safely evaluate a simple arithmetic expression using ast."""
     try:
         node = ast.parse(expr.strip(), mode="eval")
-        if not isinstance(node, ast.Expression):
+        if not isinstance(node, ast.Expression):  # pragma: no cover
             raise ValueError("Invalid expression")
 
         def _eval(n):
@@ -29,10 +30,11 @@ def _safe_eval(expr: str) -> float:
                 right = _eval(n.right)
                 return _ALLOWED_OPERATORS[op_type](left, right)
             raise ValueError("Unsupported expression node")
-        
+
         return _eval(node.body)
     except Exception as e:
         raise ValueError(f"Safe evaluation failed: {e}")
+
 
 def execute_task(
     task_text: str,
@@ -64,4 +66,3 @@ def execute_task(
 
     # Normalize internal whitespace (symmetry with prediction/task gen)
     return ' '.join(outcome.split())
-
