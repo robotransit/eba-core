@@ -38,7 +38,12 @@ class ECKConfig:
     # ── Agent loop ────────────────────────────────────────────────────
     max_iterations: int = 100
     max_queue_size: int = 50
-    guard_interval: int = 5
+    # guard_interval: how frequently the periodic severe-instability guard fires.
+    # Default 1 = per-cycle semantics (maximally conservative, matches architecture).
+    # Increase to introduce a grace period before halting on severe instability
+    # — explicit operator opt-in to relaxed posture. guard_interval=N means
+    # the agent may execute up to N cycles before the guard fires.
+    guard_interval: int = 1
 
     # ── Drift monitoring ──────────────────────────────────────────────
     semantic_drift_threshold: float = 0.7
