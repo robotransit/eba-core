@@ -13,7 +13,7 @@ _np: Any | None = None
 _np_failed: bool = False
 
 
-def _get_np() -> Any | None:
+def _get_np() -> Any | None:  # pragma: no cover
     """
     Lazy import of numpy with explicit failure sentinel.
 
@@ -25,7 +25,7 @@ def _get_np() -> Any | None:
     if _np_failed:
         return None
 
-    if _np is None:  # pragma: no cover
+    if _np is None:
         try:
             import numpy as np
             _np = np
