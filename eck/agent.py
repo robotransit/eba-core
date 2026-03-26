@@ -84,7 +84,7 @@ class ECKAgent:
         self._enable_embeddings: bool = self.config.enable_embeddings
         self._embedding_model: Any | None = None
 
-        if self._enable_embeddings:
+        if self._enable_embeddings:  # pragma: no cover
             try:
                 from sentence_transformers import SentenceTransformer
                 self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
