@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from eck.agent import ECKAgent
 from eck.config import ECKConfig, PolicyMode
+from eck.queue import QueueFullError
 from eck.types import make_critic_outcome
 
 
@@ -96,7 +97,6 @@ class TestQueueEmptyBehaviour(unittest.TestCase):
     def test_queue_empty_step_returns_false(self) -> None:
         """Empty queue → step() returns False."""
         agent = self._agent()
-        # Do not seed — queue starts empty
         self.assertIs(agent.step(), False)
 
     def test_queue_empty_no_seam_calls(self) -> None:
@@ -183,7 +183,7 @@ class TestPolicyModeIrreversibility(unittest.TestCase):
 
             a.seed("t2")
             a.step()
-            self.assertEqual(a.current_policy_mode, PolicyMode.GUIDED)  # no downgrade
+            self.assertEqual(a.current_policy_mode, PolicyMode.GUIDED)
 
             a.seed("t3")
             a.step()
@@ -220,7 +220,7 @@ class TestPolicyModeIrreversibility(unittest.TestCase):
             with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL):
                 a.seed("t2")
                 a.step()
-            assert_sync(PolicyMode.GUIDED)  # no downgrade
+            assert_sync(PolicyMode.GUIDED)
 
             with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.ENFORCED):
                 a.seed("t3")
@@ -232,23 +232,13 @@ class TestGoalCompletion(unittest.TestCase):
     """ADR-041 deterministic goal completion predicate."""
 
     def test_goal_completion_predicate_satisfied(self) -> None:
-        """
-        Goal completion fires when:
-          - task succeeded
-          - queue is naturally empty (not suppressed)
-          - confidence >= goal_completion_threshold
-        """
         import eck.agent as agent_mod
 
         config = ECKConfig(
             policy_mode=PolicyMode.NORMAL,
-            goal_completion_threshold=0.0,  # low threshold so initial confidence satisfies
+            goal_completion_threshold=0.0,
         )
-        a = ECKAgent(
-            objective="Test goal",
-            llm_call=dummy_llm,
-            config=config,
-        )
+        a = ECKAgent(objective="Test goal", llm_call=dummy_llm, config=config)
 
         with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
@@ -264,18 +254,13 @@ class TestGoalCompletion(unittest.TestCase):
         self.assertIs(result, False)
 
     def test_goal_completion_not_satisfied_when_confidence_low(self) -> None:
-        """Goal completion does not fire when confidence < threshold."""
         import eck.agent as agent_mod
 
         config = ECKConfig(
             policy_mode=PolicyMode.NORMAL,
-            goal_completion_threshold=0.99,  # impossible to reach in one step
+            goal_completion_threshold=0.99,
         )
-        a = ECKAgent(
-            objective="Test goal",
-            llm_call=dummy_llm,
-            config=config,
-        )
+        a = ECKAgent(objective="Test goal", llm_call=dummy_llm, config=config)
 
         with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
@@ -291,18 +276,13 @@ class TestGoalCompletion(unittest.TestCase):
         self.assertIs(result, True)
 
     def test_goal_completion_not_satisfied_when_subtasks_suppressed(self) -> None:
-        """Goal completion does not fire when subtask generation was suppressed."""
         import eck.agent as agent_mod
 
         config = ECKConfig(
             policy_mode=PolicyMode.NORMAL,
             goal_completion_threshold=0.0,
         )
-        a = ECKAgent(
-            objective="Test goal",
-            llm_call=dummy_llm,
-            config=config,
-        )
+        a = ECKAgent(objective="Test goal", llm_call=dummy_llm, config=config)
 
         with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
@@ -317,14 +297,126 @@ class TestGoalCompletion(unittest.TestCase):
         self.assertIs(result, True)
 
 
+class TestDriftHalts(unittest.TestCase):
+    """Drift-triggered halt paths — streak and severe instability."""
+
+    def test_drift_streak_halt_returns_false(self) -> None:
+        """step() returns False when drift_streak exceeds max_drift_streak."""
+        import eck.agent as agent_mod
+
+        config = ECKConfig(
+            policy_mode=PolicyMode.NORMAL,
+            max_drift_streak=2,
+        )
+        a = ECKAgent(objective="Test drift halt", llm_call=dummy_llm, config=config)
+        a.seed("task")
+
+        # Force drift_streak above max
+        a.drift.drift_streak = 3
+
+        with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "get_recommended_breadth", return_value="FULL"), \
+             patch.object(agent_mod, "should_execute", return_value=True), \
+             patch.object(agent_mod, "execute_task", return_value="outcome"), \
+             patch.object(agent_mod, "critic_evaluate",
+                          return_value=_make_critic_outcome_failure()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+            result = a.step()
+
+        self.assertIs(result, False)
+
+    def test_severe_instability_halt_returns_false(self) -> None:
+        """step() returns False when severe() is True independent of streak."""
+        import eck.agent as agent_mod
+
+        config = ECKConfig(
+            policy_mode=PolicyMode.NORMAL,
+            severe_drift_count=0,  # immediately severe
+        )
+        a = ECKAgent(objective="Test severe halt", llm_call=dummy_llm, config=config)
+        a.seed("task")
+
+        # Register one drift event — severe_drift_count=0 means
+        # any drift events > 0 triggers severe()
+        a.drift.register_drift()
+
+        with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "get_recommended_breadth", return_value="FULL"), \
+             patch.object(agent_mod, "should_execute", return_value=True), \
+             patch.object(agent_mod, "execute_task", return_value="outcome"), \
+             patch.object(agent_mod, "critic_evaluate",
+                          return_value=_make_critic_outcome_failure()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+            result = a.step()
+
+        self.assertIs(result, False)
+
+    def test_periodic_guard_severe_halts_agent(self) -> None:
+        """Periodic guard returns False when snapshot severe is True."""
+        import eck.agent as agent_mod
+
+        config = ECKConfig(
+            policy_mode=PolicyMode.NORMAL,
+            guard_interval=1,   # check every cycle
+            severe_drift_count=0,
+        )
+        a = ECKAgent(objective="Test periodic guard", llm_call=dummy_llm, config=config)
+        a.seed("task")
+
+        # Pre-populate drift events to make severe() True at snapshot time
+        # but keep drift_streak low to avoid streak halt first
+        for _ in range(2):
+            a.drift.drift_events.append(True)
+
+        with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "get_recommended_breadth", return_value="FULL"), \
+             patch.object(agent_mod, "should_execute", return_value=True), \
+             patch.object(agent_mod, "execute_task", return_value="outcome"), \
+             patch.object(agent_mod, "critic_evaluate",
+                          return_value=_make_critic_outcome_success()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+            result = a.step()
+
+        self.assertIs(result, False)
+
+
+class TestQueueFullErrorHandling(unittest.TestCase):
+    """QueueFullError during subtask push is handled gracefully."""
+
+    def test_queue_full_error_during_subtask_push_continues(self) -> None:
+        """QueueFullError during subtask push logs warning and breaks loop."""
+        import eck.agent as agent_mod
+
+        config = ECKConfig(
+            policy_mode=PolicyMode.NORMAL,
+            max_queue_size=1,
+            goal_completion_threshold=0.99,
+        )
+        a = ECKAgent(objective="Test queue full", llm_call=dummy_llm, config=config)
+        a.seed("task")
+
+        with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "get_recommended_breadth", return_value="FULL"), \
+             patch.object(agent_mod, "should_execute", return_value=True), \
+             patch.object(agent_mod, "execute_task", return_value="outcome"), \
+             patch.object(agent_mod, "critic_evaluate",
+                          return_value=_make_critic_outcome_success()), \
+             patch.object(agent_mod, "generate_subtasks",
+                          return_value=["sub1", "sub2", "sub3"]):
+            result = a.step()
+
+        # step() should complete — QueueFullError is caught, not propagated
+        self.assertIs(result, True)
+
+
 class TestTaskLifecycle(unittest.TestCase):
     """Task lifecycle recording is absent pending v0.2.0 audit layer."""
 
     def test_task_lifecycle_recording_absent(self) -> None:
-        """
-        MemoryRetrieval has no record() method — task lifecycle recording
-        is absent pending the v0.2.0 audit/observability layer (task.py).
-        """
         from eck.memory import MemoryRetrieval
         memory = MemoryRetrieval(enabled=False)
         self.assertFalse(hasattr(memory, "record"))
