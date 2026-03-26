@@ -195,6 +195,8 @@ class MemoryRetrieval:
 
         embedding_model is an optional internal advisory hook (passed from ECKAgent when available).
         It does not affect formatting surface (ADR-026) or disabled/empty retrieval invariants.
+        The embedding_model path requires optional extras (sentence-transformers, numpy)
+        and is excluded from core CI coverage — tested in capability layer only.
         """
         query = self.build_retrieval_query(user_input)
 
@@ -211,14 +213,14 @@ class MemoryRetrieval:
                 execution = RetrievalExecution(items=())
             else:
                 # Get candidate set (broader for optional similarity)
-                if embedding_model is not None:
+                if embedding_model is not None:  # pragma: no cover
                     candidate_items = list(self._mock_world_model)
                 else:
                     execution = self._run_retrieval(query)
                     candidate_items = list(execution.items)
 
                 # Advisory similarity ordering (changes order only)
-                if embedding_model is not None:
+                if embedding_model is not None:  # pragma: no cover
                     from .similarity import _optional_retrieve_similar
                     ordered_items = _optional_retrieve_similar(candidate_items, query.text, len(candidate_items), embedding_model)
                 else:
