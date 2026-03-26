@@ -237,6 +237,8 @@ class ECKAgent:
             )
 
         # 4. Drift tracking (append-only, no reset — ADR-040)
+        # Observability only — enforcement is in the periodic guard (step 7).
+        # drift_snap includes "severe" field — no separate severe-specific log needed.
         perceptual_drift = self.drift.record_error(error)
         feasible = is_numeric_feasible(prediction, outcome)
         self.drift.record_feasibility(feasible, success)
@@ -261,17 +263,6 @@ class ECKAgent:
         if self.drift.drift_streak > self.config.max_drift_streak:
             logger.critical(
                 "Repeated drift detected — halting agent",
-                extra={
-                    "task_id": task_id,
-                    **drift_snap,
-                },
-            )
-            return False
-
-        # Severe instability halt (independent of streak — ADR-040)
-        if self.drift.severe():
-            logger.critical(
-                "Severe instability detected — halting agent",
                 extra={
                     "task_id": task_id,
                     **drift_snap,
@@ -344,7 +335,9 @@ class ECKAgent:
 
         self.cycles += 1
 
-        # 7. Periodic guard
+        # 7. Periodic guard — single severe halt seam (ADR-040)
+        # Default guard_interval=1 delivers per-cycle semantics.
+        # Increase guard_interval to introduce a grace period (explicit opt-in).
         if self.cycles % self.config.guard_interval == 0:
             snap = self.drift.snapshot()
             if snap["severe"]:
