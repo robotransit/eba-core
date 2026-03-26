@@ -25,8 +25,8 @@ def _get_np() -> Any | None:
     if _np_failed:
         return None
 
-    if _np is None:
-        try:  # pragma: no cover
+    if _np is None:  # pragma: no cover
+        try:
             import numpy as np
             _np = np
         except Exception:
