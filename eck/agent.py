@@ -9,7 +9,6 @@ from .queue import TaskQueue, QueueFullError
 from .memory import MemoryRetrieval
 from .drift import DriftMonitor
 from .confidence import ConfidenceSignal
-from .types import CriticOutcome
 from .utils import (
     generate_id,
     is_numeric_feasible,
@@ -192,7 +191,9 @@ class ECKAgent:
             outcome = ""
 
         # 3. Critic (ADR-022)
-        critic_outcome = critic_evaluate(
+        # critic_evaluate returns (CriticOutcome, PartialStructure | None).
+        # Invariant: partial_structure is not None iff category == "partial".
+        critic_outcome, partial_structure = critic_evaluate(
             task_text=task_text,
             prediction=prediction,
             result=outcome,
@@ -211,30 +212,31 @@ class ECKAgent:
                 "category": critic_outcome.category,
                 "severity": critic_outcome.severity,
                 "success": critic_outcome.success,
+                "partial_structure": {
+                    "conflict_kind": partial_structure.conflict_kind.name,
+                    "conflict_footprint": sorted([
+                        locus.name for locus in partial_structure.conflict_footprint
+                    ]),
+                } if partial_structure else None,
             },
         )
 
         # Confidence update (ADR-021–025)
-        # NOTE:
-        # Partial outcomes require a PartialStructure (ConflictKind + ConflictLocus)
-        # which the critic does not currently produce. Partial outcomes are skipped
-        # here — epistemically conservative, not wrong. A follow-on commit must
-        # extend critic_evaluate() to produce PartialStructure alongside partial
-        # outcomes, at which point the guard below can be removed.
-        # TODO: derive PartialStructure from critic_outcome and pass it here.
-        if critic_outcome.category != "partial":
-            prior_confidence = self._confidence.get_value()
-            new_confidence = self._confidence.update(critic_outcome)
-            logger.info(
-                "Confidence updated",
-                extra={
-                    "task_id": task_id,
-                    "category": critic_outcome.category,
-                    "prior_confidence": round(prior_confidence, 4),
-                    "new_confidence": round(new_confidence, 4),
-                    "failure_window_active": self._confidence._last_outcome_was_failure,
-                },
-            )
+        # partial_structure is passed directly — confidence.py validates the
+        # invariant that partial outcomes carry PartialStructure and non-partial
+        # outcomes do not. No guard needed here.
+        prior_confidence = self._confidence.get_value()
+        new_confidence = self._confidence.update(critic_outcome, partial_structure)
+        logger.info(
+            "Confidence updated",
+            extra={
+                "task_id": task_id,
+                "category": critic_outcome.category,
+                "prior_confidence": round(prior_confidence, 4),
+                "new_confidence": round(new_confidence, 4),
+                "failure_window_active": self._confidence._last_outcome_was_failure,
+            },
+        )
 
         # 4. Drift tracking (append-only, no reset — ADR-040)
         # Observability only — enforcement is in the periodic guard (step 7).
