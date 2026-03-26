@@ -1,3 +1,6 @@
+# tests/test_policy_gate.py
+"""Tests for PolicyGate and DefaultPolicyGate."""
+
 from __future__ import annotations
 
 import unittest
@@ -8,7 +11,19 @@ from eck.policy_gate import (
     PolicyCause,
     PolicyContext,
     PolicyDecision,
+    PolicyGate,
 )
+
+
+class TestPolicyGateBase(unittest.TestCase):
+    """Base PolicyGate contract — evaluate() raises NotImplementedError."""
+
+    def test_base_evaluate_raises_not_implemented(self) -> None:
+        """Direct instantiation of PolicyGate raises NotImplementedError on evaluate()."""
+        gate = PolicyGate()
+        context = PolicyContext()
+        with self.assertRaises(NotImplementedError):
+            gate.evaluate("action", 0.5, context)
 
 
 class TestDefaultPolicyGate(unittest.TestCase):
