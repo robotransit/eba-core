@@ -125,7 +125,10 @@ class ConfidenceSignal:
         if prior_failure_window_active:
             if base_class is MovementClass.BOTH:
                 effective_class = MovementClass.DOWN_ONLY
-            elif base_class is MovementClass.UP_ONLY:
+            elif base_class is MovementClass.UP_ONLY:  # pragma: no cover
+                # UP_ONLY is not reachable from the current ConflictKind taxonomy
+                # (_KIND_TO_MOVEMENT_CLASS has no UP_ONLY mapping). This branch
+                # is retained for future ConflictKind extensions.
                 effective_class = MovementClass.NEITHER
 
         return base_class, effective_class
@@ -134,13 +137,15 @@ class ConfidenceSignal:
         """Clamp delta according to movement class (ADR-023)."""
         if movement_class is MovementClass.BOTH:
             return delta
-        if movement_class is MovementClass.UP_ONLY:
+        if movement_class is MovementClass.UP_ONLY:  # pragma: no cover
+            # UP_ONLY is not reachable from the current ConflictKind taxonomy.
+            # Retained for future ConflictKind extensions.
             return max(0.0, delta)
         if movement_class is MovementClass.DOWN_ONLY:
             return min(0.0, delta)
         if movement_class is MovementClass.NEITHER:
             return 0.0
-        raise ValueError("unreachable movement class")
+        raise ValueError("unreachable movement class")  # pragma: no cover
 
     def update(
         self,
@@ -223,7 +228,7 @@ class ConfidenceSignal:
             elif effective_class is MovementClass.NEITHER:
                 clamp_reason = "movement_class_neither_clamped"
             else:
-                clamp_reason = "movement_class_clamped"
+                clamp_reason = "movement_class_clamped"  # pragma: no cover
         else:
             clamp_reason = "no_clamp"
 
