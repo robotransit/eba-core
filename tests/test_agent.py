@@ -302,7 +302,7 @@ class TestGoalCompletion(unittest.TestCase):
 
 
 class TestDriftHalts(unittest.TestCase):
-    """Drift-triggered halt paths — streak and severe instability."""
+    """Drift-triggered halt paths — streak halt and severe instability via periodic guard."""
 
     def test_drift_streak_halt_returns_false(self) -> None:
         """step() returns False when drift_streak exceeds max_drift_streak."""
@@ -330,10 +330,14 @@ class TestDriftHalts(unittest.TestCase):
         self.assertIs(result, False)
 
     def test_severe_instability_halt_returns_false(self) -> None:
-        """step() returns False when severe() returns True independent of streak."""
+        """step() returns False when periodic guard detects severe instability."""
         import eck.agent as agent_mod
 
-        config = ECKConfig(policy_mode=PolicyMode.NORMAL)
+        config = ECKConfig(
+            policy_mode=PolicyMode.NORMAL,
+            guard_interval=1,
+            goal_completion_threshold=0.99,
+        )
         a = ECKAgent(objective="Test severe halt", llm_call=dummy_llm, config=config)
         a.seed("task")
 
@@ -345,7 +349,16 @@ class TestDriftHalts(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate",
                           return_value=_make_critic_outcome_failure()), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "severe", return_value=True), \
+             patch.object(a.drift, "snapshot",
+                          return_value={
+                              "drift_streak": 0,
+                              "total_drift_events": 0,
+                              "last_error_z": 0.0,
+                              "numeric_bias": 1.0,
+                              "feasibility_sample_count": 0,
+                              "numeric_success_rate": None,
+                              "severe": True,
+                          }), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]):
             result = a.step()
 
@@ -386,6 +399,51 @@ class TestDriftHalts(unittest.TestCase):
             result = a.step()
 
         self.assertIs(result, False)
+
+
+class TestGuardIntervalInvariant(unittest.TestCase):
+    """guard_interval bounds the maximum cycles before a severe halt."""
+
+    def test_severe_halt_within_guard_interval_cycles(self) -> None:
+        """Severe instability halts within at most guard_interval cycles."""
+        import eck.agent as agent_mod
+
+        guard_interval = 3
+        config = ECKConfig(
+            policy_mode=PolicyMode.NORMAL,
+            guard_interval=guard_interval,
+            goal_completion_threshold=0.99,
+        )
+        a = ECKAgent(objective="Test guard interval", llm_call=dummy_llm, config=config)
+
+        halt_cycle = None
+        for i in range(guard_interval + 1):
+            a.seed(f"task_{i}")
+            with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.NORMAL), \
+                 patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+                 patch.object(agent_mod, "get_recommended_breadth", return_value="FULL"), \
+                 patch.object(agent_mod, "should_execute", return_value=True), \
+                 patch.object(agent_mod, "execute_task", return_value="outcome"), \
+                 patch.object(agent_mod, "critic_evaluate",
+                              return_value=_make_critic_outcome_failure()), \
+                 patch.object(a.drift, "record_error", return_value=False), \
+                 patch.object(a.drift, "snapshot",
+                              return_value={
+                                  "drift_streak": 0,
+                                  "total_drift_events": 0,
+                                  "last_error_z": 0.0,
+                                  "numeric_bias": 1.0,
+                                  "feasibility_sample_count": 0,
+                                  "numeric_success_rate": None,
+                                  "severe": True,
+                              }), \
+                 patch.object(agent_mod, "generate_subtasks", return_value=[]):
+                if not a.step():
+                    halt_cycle = i + 1
+                    break
+
+        self.assertIsNotNone(halt_cycle, "Agent did not halt within guard_interval cycles")
+        self.assertLessEqual(halt_cycle, guard_interval)
 
 
 class TestSubtaskGenerationLogging(unittest.TestCase):
