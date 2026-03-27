@@ -4,13 +4,14 @@
   PlusCal / TLA+
 
   Models the propose/authorize/perform execution boundary.
-  Verified properties:
-    INV1  NoEffectWithoutGateAuthorization
-    INV2  NoEffectWithoutKernelAuthorization
-    INV3  NoEffectWithoutProposal
-    INV4  HaltFreezesKernelState
-    INV5  PolicyEscalationIsMonotonic
-    INV6  GateAuthorizationRequiresNonHalt
+  Verified properties (six state invariants + one temporal property):
+      INV1  NoEffectWithoutGateAuthorization     (state invariant)
+      INV2  NoEffectWithoutKernelAuthorization   (state invariant)
+      INV3  NoEffectWithoutProposal              (state invariant)
+      INV5  PolicyEscalationIsMonotonic          (state invariant)
+      INV6  GateAuthorizationRequiresNonHalt     (state invariant)
+      INV7  GateAuthorizationMatchesPermission   (state invariant)
+      INV4  HaltFreezesKernelState               (temporal property — PROPERTY in TLC)
 
   Scope:
     - Policy mode state machine (NORMAL → GUIDED → ENFORCED → HALT)
