@@ -54,7 +54,52 @@ Required work:
   rate limits. Only this function may perform external effects.
 - Runtime assertions mapping to model assumptions
 
-### 3. Property Testing and Static Analysis
+### 3. Formal Telemetry Schema (ADR required)
+
+**Prerequisite: execute_task ADR must land first.** The telemetry schema must
+reflect the locked step() structure including propose/authorize/perform phases.
+Designing the schema before that ADR risks building against a step() that is
+about to change structurally.
+
+Once the execution surface ADR is locked:
+
+- **Formal event envelope** — canonical shape for all telemetry events:
+  `event_type`, `version`, `timestamp`, `trace_id`, `step_id`,
+  `deterministic_nonce`, `severity`, `source`, `payload`
+  - `trace_id`: correlates a single agent run
+  - `step_id`: correlates all events within a single `step()` cycle —
+    directly addresses the current gap where correlation relies on `task_id`
+    and timestamp, which is fragile
+  - `deterministic_nonce`: monotonic integer per run for deterministic
+    ordering and replay — aligns with ECK's determinism goals
+
+- **Event type taxonomy** — finite, filterable set of canonical event names:
+  `step.start`, `step.end`, `policy.evaluate`, `epistemic.signal`,
+  `action.proposed`, `action.executed`, plus phase events matching the
+  locked execution model. Specific phase names to be defined in the ADR.
+
+- **`eck/telemetry.py`** — stdlib-only core module:
+  - Constructs and emits validated event envelopes
+  - Wraps existing `extra={}` into `telemetry_event` key — backwards
+    compatible, existing log pipelines unaffected
+  - Exposes `redact_hook`: user-supplied callable receiving payload and
+    returning scrubbed payload — gives integrators a PII path without
+    the kernel implementing policy
+  - Lightweight validation toggle (no external deps by default)
+
+- **Optional exporters as separate packages** — e.g. `eck.telemetry_otlp`
+  installed separately, not as an extras group. Makes the optional/core
+  boundary explicit at the package level. Consistent with ECK's existing
+  optional dependency philosophy.
+
+- **`telemetry/telemetry.schema.json`** and **`telemetry/event_catalog.md`**
+  — machine-readable schema and human-readable event catalog in a dedicated
+  `telemetry/` directory
+
+- **Telemetry ADR** — documents schema versioning rules, the stdlib-only
+  core constraint, and the optional exporter pattern
+
+### 4. Property Testing and Static Analysis
 
 Can begin in parallel with steps 1 and 2.
 
@@ -66,7 +111,7 @@ Can begin in parallel with steps 1 and 2.
 - **icontract** — runtime contract enforcement making ADR invariant violations
   fail-fast in development
 
-### 4. Domain-Specific PolicyGate Implementations
+### 5. Domain-Specific PolicyGate Implementations
 
 `DefaultPolicyGate` is a bootstrapping placeholder with fixed thresholds and
 no domain awareness. `PolicyContext` fields (`environment`, `safety_level`) and
@@ -74,7 +119,7 @@ no domain awareness. `PolicyContext` fields (`environment`, `safety_level`) and
 domain-specific subclasses that interpret these fields and apply
 domain-appropriate rule sets.
 
-### 5. Formal Verification (if higher assurance required)
+### 6. Formal Verification (if higher assurance required)
 
 If deployment context demands it:
 - Commission formal verification of `authorize_and_perform` (Dafny or Coq)
@@ -110,11 +155,20 @@ a prerequisite. Benchmarking against the current stub would tell us nothing.
   (confidence signal, drift monitor, partial outcomes, goal predicate)
 - Comparison baseline: same LLM, same tasks, ECK wrapped vs unwrapped
 
-### 3. Publish Findings
+### 3. Telemetry — PII, Sampling, and Compliance
+
+Once domain modules are handling sensitive data:
+- Define fields that must never appear in telemetry payloads
+- Implement sampling and configurable verbosity per event_type for
+  high-volume advisory calls
+- Compliance integrations (append-only tamper-evident store, retention
+  policies, audit trail requirements for regulated domains)
+- Extend `redact_hook` interface with domain-specific scrubbing policies
+
+### 4. Publish Findings
 
 - Convert empirical results into a technical report or paper
-- "ECK demonstrably improves task reliability and reduces harmful actions
-  by X%" is the evidenced claim that supports domain operator adoption
+- The evidenced empirical claim is what supports domain operator adoption
 - This is the work that turns ECK from an architectural claim into a
   validated one
 
