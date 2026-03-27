@@ -17,14 +17,6 @@ for the full ADR-mapped completion record.
 
 ---
 
-## Remaining Housekeeping (v0.2.0)
-
-- Update GitHub Actions workflow actions to Node.js 24 before June 2nd 2026
-  forced cutover (actions/checkout, actions/setup-python, actions/cache,
-  actions/upload-artifact)
-
----
-
 ## v0.3.0 Roadmap — Complete and Harden the Architecture
 
 ### 1. Formal Model (TLA⁺ or Alloy)
