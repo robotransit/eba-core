@@ -8,7 +8,7 @@
     INV1  NoEffectWithoutGateAuthorization
     INV2  NoEffectWithoutKernelAuthorization
     INV3  NoEffectWithoutProposal
-    INV4  HaltIsAbsorbing
+    INV4  HaltFreezesKernelState
     INV5  PolicyEscalationIsMonotonic
     INV6  GateAuthorizationRequiresNonHalt
 
@@ -342,22 +342,17 @@ GateAuthorizationMatchesPermission ==
 
 \* ── Temporal property ───────────────────────────────────────────────────────
 
-\* INV4: HALT is fully absorbing — once halted, the entire state is frozen.
+\* INV4: Halt freezes all kernel state variables.
 \*
-\* The weaker form `[][halted => halted']_halted` only pins the halted
-\* variable itself. A stronger and correct absorption property asserts that
-\* once halted = TRUE, no variable in the state may change — not just halted.
-\*
-\* `UNCHANGED Vars` asserts that every variable in the Vars tuple takes the
-\* same value in the next state. This is the correct encoding of a terminal
-\* absorbing state in TLA+.
-\*
-\* The simpler `[](halted => UNCHANGED Vars)` expresses full-state quiescence
-\* directly without the subscript. Since UNCHANGED Vars already requires every
-\* variable to be frozen, the subscripted form adds no additional generality.
+\* Once halted = TRUE, the seven operational variables stop changing.
+\* `pc` (the PlusCal program counter) is intentionally excluded —
+\* it is a translator artefact with no counterpart in the implementation.
+\* In agent.py, step() simply returns False when halted; there is no
+\* equivalent of pc advancing. The property proved here corresponds
+\* exactly to what the implementation guarantees.
 \*
 \* Register as a PROPERTY in TLC (not an invariant — modal formula).
-HaltIsAbsorbing ==
+HaltFreezesKernelState ==
     [][halted => UNCHANGED <<policy_mode, proposed_action, gate_authorized,
                              kernel_authorized, execution_permitted,
                              effect_performed, prior_policy_mode>>]_vars
@@ -365,7 +360,7 @@ HaltIsAbsorbing ==
 \* ── State invariant conjunction for TLC ─────────────────────────────────────
 \*
 \* Register ECKStateInvariants as an INVARIANT in TLC.
-\* Register HaltIsAbsorbing separately as a PROPERTY in TLC.
+\* Register HaltFreezesKernelState separately as a PROPERTY in TLC.
 
 ECKStateInvariants ==
     /\ NoEffectWithoutGateAuthorization
