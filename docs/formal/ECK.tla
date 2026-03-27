@@ -40,12 +40,11 @@ CONSTANTS
     HALT_MODE
 
 \* Strict ordering for monotonic escalation (maps PolicyMode → rank)
-PolicyOrder == [
-    NORMAL    |-> 0,
-    GUIDED    |-> 1,
-    ENFORCED  |-> 2,
-    HALT_MODE |-> 3
-]
+PolicyOrder(m) ==
+    IF m = NORMAL    THEN 0
+    ELSE IF m = GUIDED   THEN 1
+    ELSE IF m = ENFORCED THEN 2
+    ELSE 3
 
 PolicyModes == {NORMAL, GUIDED, ENFORCED, HALT_MODE}
 
@@ -123,7 +122,7 @@ begin
             \* ── Check halt immediately after escalation ───────────────────
             HaltCheck:
                 if halted then
-                    goto Done
+                    goto Finished
                 end if;
 
             \* ── Step 2: Propose execution ─────────────────────────────────
@@ -178,23 +177,134 @@ begin
 
         end while;
 
-    Done:
+    Finished:
         skip
 
 end algorithm; *)
+\* BEGIN TRANSLATION (chksum(pcal) = "85790189" /\ chksum(tla) = "3dbd5beb")
+VARIABLES policy_mode, proposed_action, gate_authorized, kernel_authorized, 
+          execution_permitted, effect_performed, halted, prior_policy_mode, 
+          pc
 
-\* ── State variable tuple (required for UNCHANGED in temporal properties) ────
+vars == << policy_mode, proposed_action, gate_authorized, kernel_authorized, 
+           execution_permitted, effect_performed, halted, prior_policy_mode, 
+           pc >>
 
-Vars == <<
-    policy_mode,
-    proposed_action,
-    gate_authorized,
-    kernel_authorized,
-    execution_permitted,
-    effect_performed,
-    halted,
-    prior_policy_mode
->>
+Init == (* Global variables *)
+        /\ policy_mode = NORMAL
+        /\ proposed_action = NO_ACTION
+        /\ gate_authorized = FALSE
+        /\ kernel_authorized = FALSE
+        /\ execution_permitted = FALSE
+        /\ effect_performed = FALSE
+        /\ halted = FALSE
+        /\ prior_policy_mode = NORMAL
+        /\ pc = "AgentLoop"
+
+AgentLoop == /\ pc = "AgentLoop"
+             /\ IF ~halted
+                   THEN /\ prior_policy_mode' = policy_mode
+                        /\ proposed_action' = NO_ACTION
+                        /\ gate_authorized' = FALSE
+                        /\ kernel_authorized' = FALSE
+                        /\ execution_permitted' = FALSE
+                        /\ effect_performed' = FALSE
+                        /\ pc' = "PolicyEscalation"
+                   ELSE /\ pc' = "Finished"
+                        /\ UNCHANGED << proposed_action, gate_authorized, 
+                                        kernel_authorized, execution_permitted, 
+                                        effect_performed, prior_policy_mode >>
+             /\ UNCHANGED << policy_mode, halted >>
+
+PolicyEscalation == /\ pc = "PolicyEscalation"
+                    /\ \/ /\ TRUE
+                          /\ UNCHANGED <<policy_mode, halted>>
+                       \/ /\ IF policy_mode = NORMAL
+                                THEN /\ policy_mode' = GUIDED
+                                ELSE /\ TRUE
+                                     /\ UNCHANGED policy_mode
+                          /\ UNCHANGED halted
+                       \/ /\ IF policy_mode = NORMAL \/ policy_mode = GUIDED
+                                THEN /\ policy_mode' = ENFORCED
+                                ELSE /\ TRUE
+                                     /\ UNCHANGED policy_mode
+                          /\ UNCHANGED halted
+                       \/ /\ policy_mode' = HALT_MODE
+                          /\ halted' = TRUE
+                    /\ pc' = "HaltCheck"
+                    /\ UNCHANGED << proposed_action, gate_authorized, 
+                                    kernel_authorized, execution_permitted, 
+                                    effect_performed, prior_policy_mode >>
+
+HaltCheck == /\ pc = "HaltCheck"
+             /\ IF halted
+                   THEN /\ pc' = "Finished"
+                   ELSE /\ pc' = "ProposeExecution"
+             /\ UNCHANGED << policy_mode, proposed_action, gate_authorized, 
+                             kernel_authorized, execution_permitted, 
+                             effect_performed, halted, prior_policy_mode >>
+
+ProposeExecution == /\ pc = "ProposeExecution"
+                    /\ proposed_action' = PROPOSED
+                    /\ pc' = "GateCheck"
+                    /\ UNCHANGED << policy_mode, gate_authorized, 
+                                    kernel_authorized, execution_permitted, 
+                                    effect_performed, halted, 
+                                    prior_policy_mode >>
+
+GateCheck == /\ pc = "GateCheck"
+             /\ IF policy_mode # HALT_MODE
+                   THEN /\ \/ /\ execution_permitted' = TRUE
+                              /\ gate_authorized' = TRUE
+                           \/ /\ TRUE
+                              /\ UNCHANGED <<gate_authorized, execution_permitted>>
+                   ELSE /\ TRUE
+                        /\ UNCHANGED << gate_authorized, execution_permitted >>
+             /\ pc' = "KernelAuthorize"
+             /\ UNCHANGED << policy_mode, proposed_action, kernel_authorized, 
+                             effect_performed, halted, prior_policy_mode >>
+
+KernelAuthorize == /\ pc = "KernelAuthorize"
+                   /\ IF gate_authorized /\ proposed_action = PROPOSED
+                         THEN /\ \/ /\ kernel_authorized' = TRUE
+                                 \/ /\ TRUE
+                                    /\ UNCHANGED kernel_authorized
+                         ELSE /\ TRUE
+                              /\ UNCHANGED kernel_authorized
+                   /\ pc' = "PerformEffect"
+                   /\ UNCHANGED << policy_mode, proposed_action, 
+                                   gate_authorized, execution_permitted, 
+                                   effect_performed, halted, prior_policy_mode >>
+
+PerformEffect == /\ pc = "PerformEffect"
+                 /\ IF gate_authorized /\ kernel_authorized /\ proposed_action = PROPOSED
+                       THEN /\ effect_performed' = TRUE
+                       ELSE /\ TRUE
+                            /\ UNCHANGED effect_performed
+                 /\ pc' = "AgentLoop"
+                 /\ UNCHANGED << policy_mode, proposed_action, gate_authorized, 
+                                 kernel_authorized, execution_permitted, 
+                                 halted, prior_policy_mode >>
+
+Finished == /\ pc = "Finished"
+            /\ TRUE
+            /\ pc' = "Done"
+            /\ UNCHANGED << policy_mode, proposed_action, gate_authorized, 
+                            kernel_authorized, execution_permitted, 
+                            effect_performed, halted, prior_policy_mode >>
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == pc = "Done" /\ UNCHANGED vars
+
+Next == AgentLoop \/ PolicyEscalation \/ HaltCheck \/ ProposeExecution
+           \/ GateCheck \/ KernelAuthorize \/ PerformEffect \/ Finished
+           \/ Terminating
+
+Spec == Init /\ [][Next]_vars
+
+Termination == <>(pc = "Done")
+
+\* END TRANSLATION 
 
 \* ── TLA+ state invariants ───────────────────────────────────────────────────
 
@@ -217,7 +327,7 @@ NoEffectWithoutProposal ==
 
 \* INV5: Policy mode only advances in PolicyOrder, never reverses
 PolicyEscalationIsMonotonic ==
-    PolicyOrder[policy_mode] >= PolicyOrder[prior_policy_mode]
+    PolicyOrder(policy_mode) >= PolicyOrder(prior_policy_mode)
 
 \* INV6: Gate authorization can only be granted when policy_mode ≠ HALT_MODE
 GateAuthorizationRequiresNonHalt ==
@@ -247,7 +357,10 @@ GateAuthorizationMatchesPermission ==
 \* variable to be frozen, the subscripted form adds no additional generality.
 \*
 \* Register as a PROPERTY in TLC (not an invariant — modal formula).
-HaltIsAbsorbing == [](halted => UNCHANGED Vars)
+HaltIsAbsorbing ==
+    [][halted => UNCHANGED <<policy_mode, proposed_action, gate_authorized,
+                             kernel_authorized, execution_permitted,
+                             effect_performed, prior_policy_mode>>]_vars
 
 \* ── State invariant conjunction for TLC ─────────────────────────────────────
 \*
