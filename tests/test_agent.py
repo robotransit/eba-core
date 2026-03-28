@@ -12,6 +12,7 @@ from eck.policy_gate import (
     DefaultPolicyGate,
     ExecutionMode,
     PolicyCause,
+    PolicyContext,
     PolicyDecision,
     PolicyGate,
 )
@@ -132,6 +133,21 @@ def _agent(
     )
 
 
+# ── Drift snapshot helper ─────────────────────────────────────────────────────
+
+def _snap(severe: bool = False) -> dict:
+    """Minimal drift snapshot for use in patch targets."""
+    return {
+        "drift_streak": 0,
+        "total_drift_events": 0,
+        "last_error_z": 0.0,
+        "numeric_bias": 0.0,
+        "feasibility_sample_count": 0,
+        "numeric_success_rate": None,
+        "severe": severe,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Test classes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,10 +212,11 @@ class TestExecutionBoundary(unittest.TestCase):
         a.seed("task")
 
         with patch.object(agent_mod, "propose_execution", return_value=None), \
-             patch.object(agent_mod, "authorize_and_perform") as mock_auth, \
+             patch.object(agent_mod, "authorize_and_perform"), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         gate.evaluate.assert_not_called()
@@ -215,7 +232,8 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "authorize_and_perform") as mock_auth, \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_auth.assert_not_called()
@@ -236,7 +254,8 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "authorize_and_perform"), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", side_effect=capture_critic), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         self.assertFalse(received["result"].performed)
@@ -258,7 +277,8 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "authorize_and_perform") as mock_auth, \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_rejected()), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_auth.assert_not_called()
@@ -276,7 +296,8 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "authorize_and_perform") as mock_auth, \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_rejected()), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_auth.assert_not_called()
@@ -294,7 +315,8 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "authorize_and_perform") as mock_auth, \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_rejected()), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_auth.assert_not_called()
@@ -317,7 +339,8 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "authorize_and_perform"), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", side_effect=capture_critic), \
-             patch.object(agent_mod, "generate_subtasks", return_value=[]):
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         self.assertFalse(received["result"].performed)
@@ -342,15 +365,36 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value={
-                 "drift_streak": 0, "total_drift_events": 0,
-                 "last_error_z": 0.0, "numeric_bias": 0.0,
-                 "feasibility_sample_count": 0,
-                 "numeric_success_rate": None, "severe": False,
-             }):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_auth.assert_called_once()
+
+    def test_gate_execute_authorize_called_with_correct_arguments(self) -> None:
+        """Gate returns EXECUTE → authorize_and_perform receives correct arguments."""
+        import eck.agent as agent_mod
+
+        gate = MagicMock(spec=PolicyGate)
+        gate.evaluate.return_value = _gate_execute()
+        a = _agent(gate=gate)
+        a.seed("task")
+        proposal = _mock_proposal()
+
+        with patch.object(agent_mod, "propose_execution", return_value=proposal), \
+             patch.object(agent_mod, "authorize_and_perform",
+                          return_value=_result_performed()) as mock_auth, \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
+            a.step()
+
+        mock_auth.assert_called_once_with(
+            proposed_action=proposal,
+            policy_mode=a.current_policy_mode,
+            llm_call=dummy_llm,
+        )
 
     def test_gate_execute_result_passed_to_critic(self) -> None:
         """Gate returns EXECUTE → critic receives the ExecutionResult from authorize."""
@@ -374,19 +418,14 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", side_effect=capture_critic), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value={
-                 "drift_streak": 0, "total_drift_events": 0,
-                 "last_error_z": 0.0, "numeric_bias": 0.0,
-                 "feasibility_sample_count": 0,
-                 "numeric_success_rate": None, "severe": False,
-             }):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         self.assertEqual(received["result"], expected_result)
         self.assertTrue(received["result"].performed)
 
-    def test_gate_evaluated_with_proposal(self) -> None:
-        """Gate is called with the ProposedAction from propose_execution."""
+    def test_gate_evaluated_with_proposal_and_correct_context(self) -> None:
+        """Gate is called with the ProposedAction and correct PolicyContext."""
         import eck.agent as agent_mod
 
         gate = MagicMock(spec=PolicyGate)
@@ -395,6 +434,9 @@ class TestExecutionBoundary(unittest.TestCase):
         a.seed("task")
         proposal = _mock_proposal()
 
+        # Ensure failure_window_active is False (default confidence state)
+        self.assertFalse(a._confidence._last_outcome_was_failure)
+
         with patch.object(agent_mod, "propose_execution", return_value=proposal), \
              patch.object(agent_mod, "authorize_and_perform",
                           return_value=_result_performed()), \
@@ -402,32 +444,47 @@ class TestExecutionBoundary(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value={
-                 "drift_streak": 0, "total_drift_events": 0,
-                 "last_error_z": 0.0, "numeric_bias": 0.0,
-                 "feasibility_sample_count": 0,
-                 "numeric_success_rate": None, "severe": False,
-             }):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         gate.evaluate.assert_called_once()
-        call_kwargs = gate.evaluate.call_args
-        self.assertEqual(call_kwargs.kwargs["proposed_action"], proposal)
+        call_kwargs = gate.evaluate.call_args.kwargs
+        self.assertEqual(call_kwargs["proposed_action"], proposal)
+        self.assertIsInstance(call_kwargs["context"], PolicyContext)
+        self.assertEqual(
+            call_kwargs["context"].failure_window_active,
+            False,
+        )
+
+    def test_gate_context_reflects_failure_window_active(self) -> None:
+        """Gate PolicyContext carries failure_window_active=True when confidence
+        signal has recorded a failure."""
+        import eck.agent as agent_mod
+
+        gate = MagicMock(spec=PolicyGate)
+        gate.evaluate.return_value = _gate_execute()
+        a = _agent(gate=gate)
+        a.seed("task")
+
+        # Force failure window active on confidence signal
+        a._confidence._last_outcome_was_failure = True
+
+        with patch.object(agent_mod, "propose_execution", return_value=_mock_proposal()), \
+             patch.object(agent_mod, "authorize_and_perform",
+                          return_value=_result_performed()), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
+            a.step()
+
+        call_kwargs = gate.evaluate.call_args.kwargs
+        self.assertTrue(call_kwargs["context"].failure_window_active)
 
 
 class TestDriftBehavior(unittest.TestCase):
     """Drift and feasibility tracking semantics — execution-aware gating."""
-
-    def _snap(self, severe: bool = False) -> dict:
-        return {
-            "drift_streak": 0,
-            "total_drift_events": 0,
-            "last_error_z": 0.0,
-            "numeric_bias": 0.0,
-            "feasibility_sample_count": 0,
-            "numeric_success_rate": None,
-            "severe": severe,
-        }
 
     # ------------------------------------------------------------------
     # Rejected/deferred skip drift
@@ -444,7 +501,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error") as mock_record_error, \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_record_error.assert_not_called()
@@ -461,7 +518,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_feasibility") as mock_record_feas, \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_record_feas.assert_not_called()
@@ -481,7 +538,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_rejected()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error") as mock_record_error, \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_record_error.assert_not_called()
@@ -501,7 +558,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_rejected()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_feasibility") as mock_record_feas, \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_record_feas.assert_not_called()
@@ -525,7 +582,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False) as mock_record_error, \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_record_error.assert_called_once()
@@ -547,7 +604,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
              patch.object(a.drift, "record_feasibility") as mock_feas, \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         mock_feas.assert_called_once()
@@ -572,7 +629,7 @@ class TestDriftBehavior(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_failure()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=True), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             result = a.step()
 
         self.assertIs(result, False)
@@ -580,15 +637,6 @@ class TestDriftBehavior(unittest.TestCase):
 
 class TestPeriodicGuard(unittest.TestCase):
     """Periodic severe instability guard — single seam (ADR-040)."""
-
-    def _snap(self, severe: bool) -> dict:
-        return {
-            "drift_streak": 0, "total_drift_events": 0,
-            "last_error_z": 0.0, "numeric_bias": 0.0,
-            "feasibility_sample_count": 0,
-            "numeric_success_rate": None,
-            "severe": severe,
-        }
 
     def test_severe_instability_halts_agent(self) -> None:
         """Periodic guard returns False when snapshot severe is True."""
@@ -606,7 +654,7 @@ class TestPeriodicGuard(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_failure()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value=self._snap(severe=True)):
+             patch.object(a.drift, "snapshot", return_value=_snap(severe=True)):
             result = a.step()
 
         self.assertIs(result, False)
@@ -627,7 +675,7 @@ class TestPeriodicGuard(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_failure()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value=self._snap(severe=False)):
+             patch.object(a.drift, "snapshot", return_value=_snap(severe=False)):
             result = a.step()
 
         self.assertIs(result, True)
@@ -653,14 +701,7 @@ class TestPeriodicGuard(unittest.TestCase):
                               return_value=_critic_failure()), \
                  patch.object(agent_mod, "generate_subtasks", return_value=[]), \
                  patch.object(a.drift, "record_error", return_value=False), \
-                 patch.object(a.drift, "snapshot",
-                              return_value={
-                                  "drift_streak": 0, "total_drift_events": 0,
-                                  "last_error_z": 0.0, "numeric_bias": 0.0,
-                                  "feasibility_sample_count": 0,
-                                  "numeric_success_rate": None,
-                                  "severe": True,
-                              }):
+                 patch.object(a.drift, "snapshot", return_value=_snap(severe=True)):
                 if not a.step():
                     halt_cycle = i + 1
                     break
@@ -669,7 +710,13 @@ class TestPeriodicGuard(unittest.TestCase):
         self.assertLessEqual(halt_cycle, guard_interval)
 
     def test_periodic_guard_fires_on_deferred_cycle(self) -> None:
-        """Periodic guard still runs even when execution was deferred."""
+        """Periodic guard still runs even when execution was deferred.
+
+        Deferred cycles skip drift/feasibility but still increment self.cycles
+        and therefore still reach the periodic guard. This test controls
+        get_recommended_breadth and should_execute explicitly to ensure
+        subtasks_suppressed=False and cycles is incremented.
+        """
         import eck.agent as agent_mod
 
         a = _agent(guard_interval=1, goal_completion_threshold=0.99)
@@ -677,16 +724,11 @@ class TestPeriodicGuard(unittest.TestCase):
 
         with patch.object(agent_mod, "propose_execution", return_value=None), \
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "get_recommended_breadth", return_value="FULL"), \
+             patch.object(agent_mod, "should_execute", return_value=True), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
-             patch.object(a.drift, "snapshot",
-                          return_value={
-                              "drift_streak": 0, "total_drift_events": 0,
-                              "last_error_z": 0.0, "numeric_bias": 0.0,
-                              "feasibility_sample_count": 0,
-                              "numeric_success_rate": None,
-                              "severe": True,
-                          }):
+             patch.object(a.drift, "snapshot", return_value=_snap(severe=True)):
             result = a.step()
 
         self.assertIs(result, False)
@@ -709,12 +751,7 @@ class TestPolicyModeIrreversibility(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "get_policy_mode", side_effect=modes), \
-             patch.object(a.drift, "snapshot", return_value={
-                 "drift_streak": 0, "total_drift_events": 0,
-                 "last_error_z": 0.0, "numeric_bias": 0.0,
-                 "feasibility_sample_count": 0,
-                 "numeric_success_rate": None, "severe": False,
-             }):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.seed("t1")
             a.step()
             self.assertEqual(a.current_policy_mode, PolicyMode.GUIDED)
@@ -740,18 +777,11 @@ class TestPolicyModeIrreversibility(unittest.TestCase):
 
         assert_sync(PolicyMode.NORMAL)
 
-        snap = {
-            "drift_streak": 0, "total_drift_events": 0,
-            "last_error_z": 0.0, "numeric_bias": 0.0,
-            "feasibility_sample_count": 0,
-            "numeric_success_rate": None, "severe": False,
-        }
-
         with patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "propose_execution", return_value=None), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
-             patch.object(a.drift, "snapshot", return_value=snap):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
 
             with patch.object(a.drift, "get_policy_mode", return_value=PolicyMode.GUIDED):
                 a.seed("t1")
@@ -772,14 +802,6 @@ class TestPolicyModeIrreversibility(unittest.TestCase):
 class TestGoalCompletion(unittest.TestCase):
     """ADR-041 deterministic goal completion predicate."""
 
-    def _snap(self) -> dict:
-        return {
-            "drift_streak": 0, "total_drift_events": 0,
-            "last_error_z": 0.0, "numeric_bias": 0.0,
-            "feasibility_sample_count": 0,
-            "numeric_success_rate": None, "severe": False,
-        }
-
     def test_goal_completion_predicate_satisfied(self) -> None:
         """Success + empty queue + threshold met → step() returns False."""
         import eck.agent as agent_mod
@@ -795,7 +817,7 @@ class TestGoalCompletion(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.seed("x")
             result = a.step()
 
@@ -816,7 +838,7 @@ class TestGoalCompletion(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.seed("x")
             result = a.step()
 
@@ -833,7 +855,7 @@ class TestGoalCompletion(unittest.TestCase):
              patch.object(agent_mod, "get_recommended_breadth", return_value="DEFERRED"), \
              patch.object(agent_mod, "should_execute", return_value=False), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.seed("x")
             result = a.step()
 
@@ -849,7 +871,7 @@ class TestGoalCompletion(unittest.TestCase):
              patch.object(agent_mod, "generate_prediction", return_value="pred"), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.seed("x")
             result = a.step()
 
@@ -858,14 +880,6 @@ class TestGoalCompletion(unittest.TestCase):
 
 class TestSubtaskGeneration(unittest.TestCase):
     """Subtask generation — gated by should_execute, logged correctly."""
-
-    def _snap(self) -> dict:
-        return {
-            "drift_streak": 0, "total_drift_events": 0,
-            "last_error_z": 0.0, "numeric_bias": 0.0,
-            "feasibility_sample_count": 0,
-            "numeric_success_rate": None, "severe": False,
-        }
 
     def test_subtasks_pushed_to_queue_when_execution_permitted(self) -> None:
         """Subtasks are pushed to queue when should_execute returns True."""
@@ -883,7 +897,7 @@ class TestSubtaskGeneration(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
              patch.object(agent_mod, "generate_subtasks", return_value=["sub1", "sub2"]), \
              patch.object(a.drift, "record_error", return_value=False), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         self.assertEqual(len(a.queue), 2)
@@ -907,7 +921,7 @@ class TestSubtaskGeneration(unittest.TestCase):
              patch.object(agent_mod, "should_execute", return_value=False), \
              patch.object(agent_mod, "critic_evaluate", return_value=_critic_deferred()), \
              patch.object(agent_mod, "generate_subtasks", side_effect=count_subtasks), \
-             patch.object(a.drift, "snapshot", return_value=self._snap()):
+             patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
         self.assertEqual(subtask_calls["n"], 0)
