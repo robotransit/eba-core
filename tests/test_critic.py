@@ -10,13 +10,217 @@ from eck.types import (
     ConflictKind,
     ConflictLocus,
     CriticOutcome,
-    PartialStructure,
-    make_critic_outcome,
+    ExecutionResult,
 )
 
 
+def _performed(outcome: str = "outcome") -> ExecutionResult:
+    """Convenience constructor for a performed ExecutionResult."""
+    return ExecutionResult(performed=True, outcome=outcome, refusal_reason=None)
+
+
+def _refused(refusal_reason: str) -> ExecutionResult:
+    """Convenience constructor for a refused ExecutionResult."""
+    return ExecutionResult(performed=False, outcome="", refusal_reason=refusal_reason)
+
+
+class TestCriticShortCircuit(unittest.TestCase):
+    """Short-circuit path — performed=False bypasses LLM entirely (ADR-042)."""
+
+    def _no_call_llm(self, prompt: str) -> str:
+        """LLM callable that must never be called."""
+        self.fail("LLM must not be called when performed=False")
+
+    # ------------------------------------------------------------------
+    # no_valid_proposal → deferred
+    # ------------------------------------------------------------------
+    def test_no_valid_proposal_returns_deferred(self) -> None:
+        """performed=False with no_valid_proposal → category='deferred'."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.category, "deferred")
+
+    def test_no_valid_proposal_severity_zero(self) -> None:
+        """performed=False with no_valid_proposal → severity=0.0."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertAlmostEqual(result.severity, 0.0)
+
+    def test_no_valid_proposal_partial_structure_none(self) -> None:
+        """performed=False with no_valid_proposal → partial_structure is None."""
+        _, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertIsNone(partial)
+
+    def test_no_valid_proposal_success_false(self) -> None:
+        """performed=False with no_valid_proposal → success=False."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertFalse(result.success)
+
+    def test_no_valid_proposal_feedback_is_refusal_reason(self) -> None:
+        """performed=False with no_valid_proposal → feedback carries refusal_reason."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertIn("no_valid_proposal", result.feedback)
+
+    # ------------------------------------------------------------------
+    # gate:* → rejected
+    # ------------------------------------------------------------------
+    def test_gate_halt_returns_rejected(self) -> None:
+        """performed=False with gate:HALT → category='rejected'."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("gate:HALT"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.category, "rejected")
+        self.assertIsNone(partial)
+
+    def test_gate_retry_returns_rejected(self) -> None:
+        """performed=False with gate:RETRY → category='rejected'."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("gate:RETRY"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.category, "rejected")
+        self.assertIsNone(partial)
+
+    def test_gate_degrade_returns_rejected(self) -> None:
+        """performed=False with gate:DEGRADE → category='rejected'."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("gate:DEGRADE"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.category, "rejected")
+        self.assertIsNone(partial)
+
+    def test_gate_refusal_severity_zero(self) -> None:
+        """performed=False with gate refusal → severity=0.0."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("gate:HALT"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertAlmostEqual(result.severity, 0.0)
+
+    def test_gate_refusal_success_false(self) -> None:
+        """performed=False with gate refusal → success=False."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("gate:HALT"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertFalse(result.success)
+
+    # ------------------------------------------------------------------
+    # Kernel refusal → rejected
+    # ------------------------------------------------------------------
+    def test_kernel_whitelist_refusal_returns_rejected(self) -> None:
+        """performed=False with kernel refusal → category='rejected'."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("action_type_not_whitelisted"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.category, "rejected")
+        self.assertIsNone(partial)
+
+    def test_kernel_missing_params_refusal_returns_rejected(self) -> None:
+        """performed=False with missing params refusal → category='rejected'."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("missing_required_parameters:prompt"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.category, "rejected")
+        self.assertIsNone(partial)
+
+    # ------------------------------------------------------------------
+    # Cross-validation still short-circuits on performed=False
+    # ------------------------------------------------------------------
+    def test_short_circuit_with_cross_validation_enabled(self) -> None:
+        """Cross-validation enabled does not prevent short-circuit on performed=False."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+            enable_cross_validation=True,
+        )
+        self.assertEqual(result.category, "deferred")
+        self.assertIsNone(partial)
+
+    # ------------------------------------------------------------------
+    # Return type contract on short-circuit path
+    # ------------------------------------------------------------------
+    def test_short_circuit_returns_critic_outcome_instance(self) -> None:
+        """Short-circuit path returns a CriticOutcome instance."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertIsInstance(result, CriticOutcome)
+
+    def test_short_circuit_success_field_derived_from_category(self) -> None:
+        """success field is always derived from category on short-circuit path."""
+        result, _ = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=self._no_call_llm,
+        )
+        self.assertEqual(result.success, result.category == "success")
+
+
 class TestCriticEvaluateSingleCall(unittest.TestCase):
-    """Single-call (no cross-validation) critic behaviour."""
+    """Single-call (no cross-validation) critic behaviour — performed=True path."""
 
     def _llm(self, response: str):
         """Return a fixed-response LLM callable."""
@@ -32,7 +236,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": 0.2, "feedback": "good"}'),
             enable_cross_validation=False,
@@ -45,7 +249,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": 0.2, "feedback": "good"}'),
             enable_cross_validation=False,
@@ -60,7 +264,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": 0.2, "feedback": "good"}'),
             enable_cross_validation=False,
@@ -74,7 +278,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": 0.3, "feedback": "ok"}'),
             enable_cross_validation=False,
@@ -86,7 +290,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": 0.2, "feedback": "looks good"}'),
             enable_cross_validation=False,
@@ -101,7 +305,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "failure", "severity": 0.8, "feedback": "bad"}'),
             enable_cross_validation=False,
@@ -115,7 +319,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "failure", "severity": 0.2, "feedback": "minor"}'),
             enable_cross_validation=False,
@@ -130,7 +334,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "failure", "severity": 0.5, "feedback": "borderline"}'),
             enable_cross_validation=False,
@@ -144,7 +348,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "failure", "severity": 0.6, "feedback": "mid"}'),
             enable_cross_validation=False,
@@ -161,7 +365,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm("not json at all"),
             enable_cross_validation=False,
@@ -175,7 +379,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm("not json at all"),
             enable_cross_validation=False,
@@ -187,7 +391,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm("not json at all"),
             enable_cross_validation=False,
@@ -200,9 +404,23 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm(""),
+            enable_cross_validation=False,
+        )
+        self.assertEqual(result.category, "failure")
+        self.assertAlmostEqual(result.severity, 1.0)
+        self.assertIsNone(partial)
+
+    def test_non_string_llm_response_pessimistic_failure(self) -> None:
+        """Non-string LLM response returns pessimistic failure."""
+        result, partial = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_performed(),
+            objective="obj",
+            llm_call=lambda prompt: None,
             enable_cross_validation=False,
         )
         self.assertEqual(result.category, "failure")
@@ -214,7 +432,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "maybe", "severity": 0.5, "feedback": "unsure"}'),
             enable_cross_validation=False,
@@ -226,7 +444,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"severity": 0.5, "feedback": "no outcome key"}'),
             enable_cross_validation=False,
@@ -238,7 +456,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": 0.2}'),
             enable_cross_validation=False,
@@ -250,7 +468,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "failure", "severity": "bad", "feedback": "x"}'),
             enable_cross_validation=False,
@@ -262,7 +480,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "failure", "severity": 1.5, "feedback": "x"}'),
             enable_cross_validation=False,
@@ -274,7 +492,7 @@ class TestCriticEvaluateSingleCall(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm('{"outcome": "success", "severity": -0.5, "feedback": "x"}'),
             enable_cross_validation=False,
@@ -309,7 +527,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(
                 conflict_kind="evidence_conflict",
@@ -333,7 +551,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -348,7 +566,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(conflict_kind="invented_kind"),
             enable_cross_validation=False,
@@ -363,7 +581,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(footprint=[]),
             enable_cross_validation=False,
@@ -378,7 +596,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(footprint=["local", "invented_locus", "factual"]),
             enable_cross_validation=False,
@@ -395,7 +613,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(footprint=["invented_a", "invented_b"]),
             enable_cross_validation=False,
@@ -413,7 +631,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -428,7 +646,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(),
             enable_cross_validation=False,
@@ -443,7 +661,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._llm_partial(),
             enable_cross_validation=False,
@@ -460,7 +678,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -476,7 +694,7 @@ class TestPartialStructureDerivation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -499,7 +717,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -516,7 +734,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -537,7 +755,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -557,7 +775,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -578,7 +796,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -587,7 +805,6 @@ class TestCriticCrossValidation(unittest.TestCase):
         self.assertEqual(result.category, "partial")
         self.assertAlmostEqual(result.severity, 0.25)
         self.assertIsNotNone(partial)
-        # Structure from first call
         self.assertEqual(partial.conflict_kind, ConflictKind.EVIDENCE_CONFLICT)
         self.assertIn(ConflictLocus.LOCAL, partial.conflict_footprint)
         self.assertIn(ConflictLocus.FACTUAL, partial.conflict_footprint)
@@ -603,7 +820,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -621,7 +838,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -644,7 +861,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -664,7 +881,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -673,12 +890,7 @@ class TestCriticCrossValidation(unittest.TestCase):
 
     def test_disagreement_on_partial_preserves_partial_category_and_structure(self) -> None:
         """Disagreement at derived-category level preserves partial category and
-        first-call PartialStructure.
-
-        call 1: failure + severity 0.2 → partial (evidence_conflict, [local])
-        call 2: failure + severity 0.8 → failure
-        Result: category=partial, severity=1.0, structure from first call.
-        """
+        first-call PartialStructure."""
         calls = {"n": 0}
 
         def llm(prompt: str) -> str:
@@ -690,7 +902,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -718,7 +930,7 @@ class TestCriticCrossValidation(unittest.TestCase):
             critic_evaluate(
                 task_text="task",
                 prediction="pred",
-                result="outcome",
+                result=_performed(),
                 objective="obj",
                 llm_call=llm,
                 enable_cross_validation=True,
@@ -740,7 +952,7 @@ class TestCriticCrossValidation(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=True,
@@ -764,7 +976,7 @@ class TestCriticCrossValidation(unittest.TestCase):
             result, partial = critic_evaluate(
                 task_text="task",
                 prediction="pred",
-                result="outcome",
+                result=_performed(),
                 objective="obj",
                 llm_call=llm,
                 enable_cross_validation=True,
@@ -793,7 +1005,7 @@ class TestVerifierCallback(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._good_llm,
             enable_cross_validation=False,
@@ -809,7 +1021,7 @@ class TestVerifierCallback(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._partial_llm,
             enable_cross_validation=False,
@@ -825,7 +1037,7 @@ class TestVerifierCallback(unittest.TestCase):
         result, _ = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._good_llm,
             enable_cross_validation=False,
@@ -838,7 +1050,7 @@ class TestVerifierCallback(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._good_llm,
             enable_cross_validation=False,
@@ -853,7 +1065,7 @@ class TestVerifierCallback(unittest.TestCase):
         result, partial = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=self._good_llm,
             enable_cross_validation=False,
@@ -862,19 +1074,38 @@ class TestVerifierCallback(unittest.TestCase):
         self.assertEqual(result.category, "success")
         self.assertIsNone(partial)
 
+    def test_verifier_not_called_on_short_circuit(self) -> None:
+        """Verifier callback is not invoked when performed=False."""
+        verifier_calls = {"n": 0}
+
+        def verifier(task: str, outcome: str) -> bool:
+            verifier_calls["n"] += 1
+            return False
+
+        critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=lambda p: self.fail("LLM must not be called"),
+            enable_cross_validation=False,
+            verifier_callback=verifier,
+        )
+        self.assertEqual(verifier_calls["n"], 0)
+
 
 class TestDeterminism(unittest.TestCase):
     """Identical inputs produce identical outputs."""
 
-    def test_deterministic_replay(self) -> None:
-        """Identical inputs produce identical (CriticOutcome, PartialStructure)."""
+    def test_deterministic_replay_performed(self) -> None:
+        """Identical performed inputs produce identical (CriticOutcome, PartialStructure)."""
         def llm(prompt: str) -> str:
             return '{"outcome": "failure", "severity": 0.2, "feedback": "minor", "conflict_kind": "evidence_conflict", "conflict_footprint": ["local", "factual"]}'
 
         result1, partial1 = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -883,7 +1114,7 @@ class TestDeterminism(unittest.TestCase):
         result2, partial2 = critic_evaluate(
             task_text="task",
             prediction="pred",
-            result="outcome",
+            result=_performed(),
             objective="obj",
             llm_call=llm,
             enable_cross_validation=False,
@@ -891,6 +1122,28 @@ class TestDeterminism(unittest.TestCase):
         )
         self.assertEqual(result1, result2)
         self.assertEqual(partial1, partial2)
+
+    def test_deterministic_replay_refused(self) -> None:
+        """Identical refused inputs produce identical CriticOutcome."""
+        result1, partial1 = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=lambda p: (_ for _ in ()).throw(AssertionError("must not call")),
+            enable_cross_validation=False,
+        )
+        result2, partial2 = critic_evaluate(
+            task_text="task",
+            prediction="pred",
+            result=_refused("no_valid_proposal"),
+            objective="obj",
+            llm_call=lambda p: (_ for _ in ()).throw(AssertionError("must not call")),
+            enable_cross_validation=False,
+        )
+        self.assertEqual(result1, result2)
+        self.assertIsNone(partial1)
+        self.assertIsNone(partial2)
 
 
 if __name__ == "__main__":
