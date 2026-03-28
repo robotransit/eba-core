@@ -9,7 +9,9 @@ Subsystem responsibilities:
                            no effects, no gate consultation
   authorize_and_perform  — sole effects boundary; enforces gate precondition,
                            action whitelist, required parameter keys, provenance;
-                           returns ExecutionResult in all cases
+                           returns ExecutionResult for contract-level refusals
+                           and performed effects; raises AssertionError for
+                           invariant violations (non-compliant caller)
 
 Thin-slice implementation note (ADR-042 section 5a):
   This is the initial v0.3.0 thin-slice implementation. It enforces a
@@ -27,10 +29,6 @@ Thin-slice implementation note (ADR-042 section 5a):
       execution context object is formalised in a subsequent slice
     - full parameter schema validation beyond key presence — deferred until
       deployment-specific schemas are defined
-
-The previous execute_task() function is retained as a deprecated shim
-for backward compatibility during the v0.3.0 transition. It will be
-removed once agent.py is fully wired to the new boundary.
 
 ADR references:
   ADR-042: Propose/Authorize/Perform Execution Boundary
@@ -392,22 +390,3 @@ def authorize_and_perform(
         outcome="",
         refusal_reason=f"unhandled_action_type:{action_type}",
     )
-
-
-# ── Deprecated shim ───────────────────────────────────────────────────────────
-
-def execute_task(
-    task_text: str,
-    llm_call: Callable[[str], str],
-    use_tools: bool = False,
-) -> str:
-    """
-    DEPRECATED — retained for backward compatibility during v0.3.0 transition.
-
-    Will be removed once agent.py is fully wired to the propose/authorize/
-    perform boundary defined in ADR-042.
-
-    Use propose_execution() + authorize_and_perform() instead.
-    """
-    outcome = llm_call(task_text).strip()
-    return " ".join(outcome.split())
