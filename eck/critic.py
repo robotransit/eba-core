@@ -5,28 +5,40 @@ Evaluates task outcomes and returns a typed CriticOutcome plus optional
 PartialStructure for consumption by the confidence signal processor (ADR-025).
 
 Design:
+- When ExecutionResult.performed=False, the critic short-circuits immediately
+  without calling the LLM. The refusal_reason is mapped deterministically to
+  "deferred" (no valid proposal) or "rejected" (gate/kernel refusal). No
+  confidence update occurs for either category (ADR-021).
+- When ExecutionResult.performed=True, the LLM evaluates result.outcome.
 - LLM reports outcome quality (success/failure) + severity [0.0, 1.0]
   plus bounded structural fields (conflict_kind, conflict_footprint)
 - Kernel derives category (success/partial/failure) from outcome + severity
 - LLM never sees "partial" — category is kernel-controlled
 - PartialStructure constructed by kernel iff derived category is "partial"
 - All downstream confidence mechanics remain kernel authority
-- CriticOutcome and PartialStructure imported from eck.types (single source)
+- CriticOutcome, PartialStructure, and ExecutionResult imported from
+  eck.types (single source of truth)
 
 Invariant:
   partial_structure is not None iff critic_outcome.category == "partial"
+
+Refusal mapping (performed=False):
+  refusal_reason == "no_valid_proposal"  → category "deferred"
+  refusal_reason starts with "gate:"     → category "rejected"
+  all other refusal reasons              → category "rejected"
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 from eck.types import (
     ConflictKind,
     ConflictLocus,
     CriticOutcome,
+    ExecutionResult,
     PartialStructure,
     make_critic_outcome,
 )
@@ -63,10 +75,29 @@ _CONFLICT_LOCUS_MAP: dict[str, ConflictLocus] = {
 }
 
 
+def _map_refusal_to_category(reason: str | None) -> Literal["rejected", "deferred"]:
+    """
+    Deterministically map an ExecutionResult refusal_reason to a
+    CriticOutcome category.
+
+    Mapping (ADR-042 / ADR-022):
+      "no_valid_proposal"       → "deferred"  (no proposal produced)
+      reason starts with "gate:" → "rejected"  (gate refused)
+      all other reasons          → "rejected"  (kernel refused)
+
+    Never raises — always returns a valid category string.
+    """
+    if reason == "no_valid_proposal":
+        return "deferred"
+    if reason and reason.startswith("gate:"):
+        return "rejected"
+    return "rejected"
+
+
 def critic_evaluate(
     task_text: str,
     prediction: str,
-    result: str,
+    result: ExecutionResult,
     objective: str,
     llm_call: Callable[[str], str],
     enable_cross_validation: bool = True,
@@ -77,6 +108,15 @@ def critic_evaluate(
     Evaluate task result and return a typed CriticOutcome plus optional
     PartialStructure (ADR-022).
 
+    When result.performed=False, the critic short-circuits immediately:
+      - no LLM call is made
+      - refusal_reason is mapped deterministically to "deferred" or "rejected"
+      - severity is 0.0
+      - partial_structure is None
+      - confidence.update() will be called but produces no change — rejected/
+        deferred categories carry no confidence signal per ADR-021
+
+    When result.performed=True, the LLM evaluates result.outcome normally.
     The LLM reports outcome quality (success/failure), severity, and bounded
     structural fields. The kernel derives the final category and constructs
     the authoritative PartialStructure — the LLM never controls failure window
@@ -103,7 +143,7 @@ def critic_evaluate(
     Args:
         task_text: The task description.
         prediction: Predicted outcome.
-        result: Actual execution outcome.
+        result: ExecutionResult from the execution boundary (ADR-042).
         objective: Overall goal.
         llm_call: Callable that takes a prompt and returns an LLM response.
         enable_cross_validation: If True, use dual critic calls for consensus.
@@ -114,15 +154,33 @@ def critic_evaluate(
         Tuple of (CriticOutcome, PartialStructure | None).
         PartialStructure is not None iff category is "partial".
     """
-    prompt = _build_prompt(task_text, prediction, result, objective)
+    # ── Short-circuit on non-performed execution (ADR-042) ────────────────────
+    # No LLM call, no partial structure, no confidence update path.
+    # Category is derived deterministically from refusal_reason.
+    if not result.performed:
+        category = _map_refusal_to_category(result.refusal_reason)
+        feedback = result.refusal_reason or "Execution refused"
+        logger.info(
+            "Critic short-circuit — execution not performed",
+            extra={
+                "category": category,
+                "refusal_reason": result.refusal_reason,
+            },
+        )
+        return make_critic_outcome(
+            category=category,
+            severity=0.0,
+            feedback=feedback,
+        ), None
+
+    # ── Performed path — LLM evaluation of result.outcome ────────────────────
+    prompt = _build_prompt(task_text, prediction, result.outcome, objective)
 
     # First critic call
     raw1 = llm_call(prompt)
     outcome1, severity1, feedback1, raw_kind1, raw_footprint1 = _parse_critic_response(raw1)
 
     # Derive category from first call before any severity modification.
-    # Category is derived here, not from raw outcome, so that disagreement
-    # detection operates at the kernel-relevant abstraction level.
     category1 = _derive_category(outcome1, severity1, partial_threshold)
 
     if not enable_cross_validation:
@@ -136,17 +194,9 @@ def critic_evaluate(
         raw2 = llm_call(prompt)
         outcome2, severity2, feedback2, raw_kind2, raw_footprint2 = _parse_critic_response(raw2)
 
-        # Derive category from second call for comparison.
-        # Disagreement is at the derived-category level, not raw outcome level.
-        # Example: both calls return "failure" but severity 0.3 vs 0.8 derives
-        # to "partial" vs "failure" — this counts as disagreement.
         category2 = _derive_category(outcome2, severity2, partial_threshold)
 
         if category1 != category2:
-            # Disagreement at derived-category level:
-            # - severity clamped to 1.0 (signals reduced confidence)
-            # - category preserved from first call (ADR-022 invariant)
-            # - PartialStructure taken from first call if category is partial
             logger.warning(
                 "Critic disagreement detected",
                 extra={
@@ -164,7 +214,6 @@ def critic_evaluate(
             final_raw_kind = raw_kind1
             final_raw_footprint = raw_footprint1
         else:
-            # Consensus: average severity, combine feedback, structure from first call
             category = category1
             final_severity = _clamp((severity1 + severity2) / 2.0)
             final_feedback = f"{feedback1} | Consensus: {feedback2}"
@@ -173,7 +222,7 @@ def critic_evaluate(
 
     # Optional external verification hook — can only demote to failure (ADR-022)
     if verifier_callback is not None:
-        if not verifier_callback(task_text, result):
+        if not verifier_callback(task_text, result.outcome):
             prior_category = category
             category = "failure"
             final_severity = 1.0
@@ -218,23 +267,20 @@ def critic_evaluate(
 def _build_prompt(
     task_text: str,
     prediction: str,
-    result: str,
+    outcome: str,
     objective: str,
 ) -> str:
     """
     Build the critic evaluation prompt.
 
-    Asks for outcome quality (success/failure), severity, feedback, and
-    bounded structural fields for partial outcome characterisation.
-    Does not mention 'partial' — category derivation is kernel-controlled.
-    Always requests conflict_kind and conflict_footprint — kernel uses them
-    only when derived category is "partial".
+    Accepts outcome string directly — called only on the performed path
+    where result.outcome is guaranteed non-empty.
     """
     return f"""Evaluate the result against the task and objective.
 
 Task: {task_text}
 Prediction: {prediction}
-Result: {result}
+Result: {outcome}
 Objective: {objective}
 
 Return ONLY valid JSON with exactly these fields:
@@ -280,9 +326,7 @@ def _parse_critic_response(
     Parse critic JSON response.
 
     Returns (outcome, severity, feedback, raw_conflict_kind, raw_conflict_footprint).
-    raw_conflict_kind and raw_conflict_footprint are raw strings/lists from the LLM
-    — kernel normalisation happens in _derive_partial_structure().
-    Pessimistic fallback on any parse failure: failure, severity=1.0, None structure.
+    Pessimistic fallback on any parse failure.
     """
     try:
         data = json.loads(response.strip())
@@ -309,7 +353,6 @@ def _parse_critic_response(
         if not feedback:
             feedback = "No feedback"
 
-        # Extract raw structural fields — no validation here, normalised later
         raw_kind = data.get("conflict_kind", None)
         if raw_kind is not None:
             raw_kind = str(raw_kind).strip().lower()
@@ -346,7 +389,6 @@ def _derive_partial_structure(
 
     Never raises — always returns a valid PartialStructure.
     """
-    # Normalise conflict_kind
     if raw_kind is not None and raw_kind in _CONFLICT_KIND_MAP:
         conflict_kind = _CONFLICT_KIND_MAP[raw_kind]
     else:
@@ -360,7 +402,6 @@ def _derive_partial_structure(
             )
         conflict_kind = _FALLBACK_CONFLICT_KIND
 
-    # Normalise conflict_footprint
     conflict_footprint: frozenset[ConflictLocus]
     if raw_footprint:
         recognised = frozenset(
@@ -397,9 +438,9 @@ def _derive_category(
     """
     Derive ADR-022 category from LLM-reported outcome and severity.
 
-    success  → "success" (kernel gate: upward permitted)
-    failure + severity < partial_threshold → "partial" (both directions, no failure window)
-    failure + severity >= partial_threshold → "failure" (downward + failure window)
+    success  → "success"
+    failure + severity < partial_threshold → "partial"
+    failure + severity >= partial_threshold → "failure"
     """
     if outcome == "success":
         return "success"
