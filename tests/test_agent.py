@@ -999,7 +999,7 @@ class TestRunMethod(unittest.TestCase):
             a.seed("x")
             a.run()
 
-        self.assertEqual(a.cycles, 1)
+        self.assertEqual(a.cycles, 0)
 
     def test_run_respects_max_iterations(self) -> None:
         """run() stops after max_iterations cycles."""
