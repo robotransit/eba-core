@@ -434,7 +434,6 @@ class TestExecutionBoundary(unittest.TestCase):
         a.seed("task")
         proposal = _mock_proposal()
 
-        # Ensure failure_window_active is False (default confidence state)
         self.assertFalse(a._confidence._last_outcome_was_failure)
 
         with patch.object(agent_mod, "propose_execution", return_value=proposal), \
@@ -451,10 +450,7 @@ class TestExecutionBoundary(unittest.TestCase):
         call_kwargs = gate.evaluate.call_args.kwargs
         self.assertEqual(call_kwargs["proposed_action"], proposal)
         self.assertIsInstance(call_kwargs["context"], PolicyContext)
-        self.assertEqual(
-            call_kwargs["context"].failure_window_active,
-            False,
-        )
+        self.assertEqual(call_kwargs["context"].failure_window_active, False)
 
     def test_gate_context_reflects_failure_window_active(self) -> None:
         """Gate PolicyContext carries failure_window_active=True when confidence
@@ -465,8 +461,6 @@ class TestExecutionBoundary(unittest.TestCase):
         gate.evaluate.return_value = _gate_execute()
         a = _agent(gate=gate)
         a.seed("task")
-
-        # Force failure window active on confidence signal
         a._confidence._last_outcome_was_failure = True
 
         with patch.object(agent_mod, "propose_execution", return_value=_mock_proposal()), \
@@ -710,13 +704,7 @@ class TestPeriodicGuard(unittest.TestCase):
         self.assertLessEqual(halt_cycle, guard_interval)
 
     def test_periodic_guard_fires_on_deferred_cycle(self) -> None:
-        """Periodic guard still runs even when execution was deferred.
-
-        Deferred cycles skip drift/feasibility but still increment self.cycles
-        and therefore still reach the periodic guard. This test controls
-        get_recommended_breadth and should_execute explicitly to ensure
-        subtasks_suppressed=False and cycles is incremented.
-        """
+        """Periodic guard still runs even when execution was deferred."""
         import eck.agent as agent_mod
 
         a = _agent(guard_interval=1, goal_completion_threshold=0.99)
@@ -925,6 +913,116 @@ class TestSubtaskGeneration(unittest.TestCase):
             a.step()
 
         self.assertEqual(subtask_calls["n"], 0)
+
+    def test_queue_full_error_during_subtask_push_is_handled(self) -> None:
+        """QueueFullError during subtask push logs warning and breaks loop."""
+        import eck.agent as agent_mod
+
+        gate = MagicMock(spec=PolicyGate)
+        gate.evaluate.return_value = _gate_execute()
+        a = _agent(gate=gate, goal_completion_threshold=0.99, max_queue_size=1)
+        a.seed("task")
+
+        with patch.object(agent_mod, "propose_execution", return_value=_mock_proposal()), \
+             patch.object(agent_mod, "authorize_and_perform",
+                          return_value=_result_performed()), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
+             patch.object(agent_mod, "generate_subtasks",
+                          return_value=["sub1", "sub2", "sub3"]), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
+            result = a.step()
+
+        self.assertIs(result, True)
+
+
+class TestSeedBehaviour(unittest.TestCase):
+    """seed() — explicit task and LLM-generated task paths."""
+
+    def test_seed_with_explicit_task_pushes_to_queue(self) -> None:
+        """seed() with an explicit task pushes it to the queue."""
+        a = _agent()
+        a.seed("explicit task")
+        self.assertEqual(len(a.queue), 1)
+
+    def test_seed_without_task_calls_llm(self) -> None:
+        """seed() with no task calls the LLM to generate one."""
+        called = {"n": 0}
+
+        def counting_llm(prompt: str) -> str:
+            called["n"] += 1
+            return "generated task"
+
+        a = ECKAgent(
+            objective="Test objective",
+            llm_call=counting_llm,
+            config=ECKConfig(),
+        )
+        a.seed()
+        self.assertGreater(called["n"], 0)
+        self.assertEqual(len(a.queue), 1)
+
+    def test_seed_without_task_uses_llm_response(self) -> None:
+        """seed() with no task uses the LLM response as the initial task."""
+        a = ECKAgent(
+            objective="Test objective",
+            llm_call=lambda p: "  llm generated task  ",
+            config=ECKConfig(),
+        )
+        a.seed()
+        task = a.queue.pop()
+        self.assertEqual(task["text"], "llm generated task")
+
+
+class TestRunMethod(unittest.TestCase):
+    """run() — iterates step() until halt or max_iterations."""
+
+    def test_run_stops_when_step_returns_false(self) -> None:
+        """run() stops when step() returns False."""
+        import eck.agent as agent_mod
+
+        a = _agent(goal_completion_threshold=0.0)
+
+        gate = MagicMock(spec=PolicyGate)
+        gate.evaluate.return_value = _gate_execute()
+        a._policy_gate = gate
+
+        with patch.object(agent_mod, "propose_execution", return_value=_mock_proposal()), \
+             patch.object(agent_mod, "authorize_and_perform",
+                          return_value=_result_performed()), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
+            a.seed("x")
+            a.run()
+
+        self.assertEqual(a.cycles, 1)
+
+    def test_run_respects_max_iterations(self) -> None:
+        """run() stops after max_iterations cycles."""
+        import eck.agent as agent_mod
+
+        a = _agent(goal_completion_threshold=0.99, max_iterations=2)
+
+        gate = MagicMock(spec=PolicyGate)
+        gate.evaluate.return_value = _gate_execute()
+        a._policy_gate = gate
+
+        with patch.object(agent_mod, "propose_execution", return_value=_mock_proposal()), \
+             patch.object(agent_mod, "authorize_and_perform",
+                          return_value=_result_performed()), \
+             patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+             patch.object(agent_mod, "critic_evaluate", return_value=_critic_success()), \
+             patch.object(agent_mod, "generate_subtasks", return_value=["sub"]), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "snapshot", return_value=_snap()):
+            a.seed("x")
+            a.run()
+
+        self.assertLessEqual(a.cycles, 2)
 
 
 class TestDefaultGateInjection(unittest.TestCase):
