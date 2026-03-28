@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from eck.config import PolicyMode
 from eck.execution import authorize_and_perform, propose_execution
@@ -160,6 +161,18 @@ class TestProposeExecutionFailClosed(unittest.TestCase):
     def test_missing_required_parameter_keys_returns_none(self) -> None:
         """Missing required parameter keys → None."""
         result = propose_execution("task", _llm_missing_required_params, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_proposed_action_construction_failure_returns_none(self) -> None:
+        """ProposedAction construction raising ValueError → None (fail closed)."""
+        with patch("eck.execution.ProposedAction", side_effect=ValueError("construction failed")):
+            result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_proposed_action_construction_type_error_returns_none(self) -> None:
+        """ProposedAction construction raising TypeError → None (fail closed)."""
+        with patch("eck.execution.ProposedAction", side_effect=TypeError("type error")):
+            result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
         self.assertIsNone(result)
 
     def test_none_return_is_not_system_halt(self) -> None:
