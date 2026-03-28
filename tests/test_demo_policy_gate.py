@@ -1,4 +1,3 @@
-```python
 # tests/test_demo_policy_gate.py
 """Tests for the ADR-043 demonstration policy module."""
 
@@ -226,4 +225,3 @@ class TestDemoPolicyGateDeterminism(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-```
