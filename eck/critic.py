@@ -7,8 +7,9 @@ PartialStructure for consumption by the confidence signal processor (ADR-025).
 Design:
 - When ExecutionResult.performed=False, the critic short-circuits immediately
   without calling the LLM. The refusal_reason is mapped deterministically to
-  "deferred" (no valid proposal) or "rejected" (gate/kernel refusal). No
-  confidence update occurs for either category (ADR-021).
+  "deferred" (no valid proposal) or "rejected" (gate/kernel refusal).
+  confidence.update() will be called but produces no change — rejected/
+  deferred categories carry no confidence signal per ADR-021.
 - When ExecutionResult.performed=True, the LLM evaluates result.outcome.
 - LLM reports outcome quality (success/failure) + severity [0.0, 1.0]
   plus bounded structural fields (conflict_kind, conflict_footprint)
@@ -274,7 +275,7 @@ def _build_prompt(
     Build the critic evaluation prompt.
 
     Accepts outcome string directly — called only on the performed path
-    where result.outcome is guaranteed non-empty.
+    where result.outcome is the execution result string.
     """
     return f"""Evaluate the result against the task and objective.
 
@@ -326,8 +327,16 @@ def _parse_critic_response(
     Parse critic JSON response.
 
     Returns (outcome, severity, feedback, raw_conflict_kind, raw_conflict_footprint).
-    Pessimistic fallback on any parse failure.
+    Pessimistic fallback on any parse or input-shape failure — including
+    non-string responses from the LLM.
     """
+    if not isinstance(response, str):
+        logger.warning(
+            "Critic response non-string — pessimistic failure (ADR-022)",
+            extra={"response_type": type(response).__name__},
+        )
+        return "failure", 1.0, "Parse failed — treated as failure", None, None
+
     try:
         data = json.loads(response.strip())
 
