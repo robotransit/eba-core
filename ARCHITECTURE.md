@@ -107,26 +107,34 @@ See the formal specification for full invariants and system model:
 
 **Policy Gate**
 - [ADR-038 — Policy Gate Contract – Exclusive Consumer of Epistemic Signals](docs/adr/ADR-038.md)
+- [ADR-043 — Demonstration Policy Module (Semantic Policy Capability)](docs/adr/ADR-043.md)
+- [ADR-044 — Out-of-Domain Policy Module Evaluation Semantics](docs/adr/ADR-044.md)
 
 #### Policy Gate (PR2 Implementation)
 
-The policy gate is the exclusive consumer of confidence for control decisions and the sole pre-execution mediation layer between epistemic state and execution. It enforces strict invariants including purity, determinism, side-effect freedom, monotonicity, and explicit default semantics. The policy gate is a pure, referentially transparent function of (proposed_action, confidence, context).
+The policy gate is the exclusive consumer of confidence for control decisions
+and the sole pre-execution mediation layer between epistemic state and
+execution. It enforces strict invariants including purity, determinism,
+side-effect freedom, monotonicity, and explicit default semantics. The policy
+gate is a pure, referentially transparent function of
+(proposed_action, confidence, context).
+
+The `PolicyGate` contract is expressed as a structural `typing.Protocol`.
+Any class implementing `evaluate(proposed_action, confidence, context) ->
+PolicyDecision` with the correct signature satisfies the contract without
+requiring nominal inheritance.
+
+Domain-specific policy modules that rely on `PolicyContext.environment` or
+equivalent contextual assumptions must follow the out-of-domain evaluation
+semantics defined in ADR-044: out-of-domain evaluation must not raise, must
+not silently passthrough, and must return an explicit non-EXECUTE
+`PolicyDecision` with a stable `rule_id` and `reason` identifying the
+domain mismatch. The kernel does not enforce policy-module/domain matching —
+that responsibility belongs to the operator.
 
 See the ADR for full contract details and invariants:
 
 → [docs/adr/ADR-038.md](docs/adr/ADR-038.md)
-
-**Agent Loop Enforcement**
-- [ADR-039 — Agent Loop & Policy Gate Integration](docs/adr/ADR-039.md)
-
-#### Agent Loop Enforcement (PR3 Implementation)
-
-The agent loop is the runtime enforcement seam for policy gate decisions.
-It ensures no execution occurs without prior gate authorization and that HALT, RETRY, and DEGRADE outcomes prevent execution of the current proposal.
-
-See the ADR for full enforcement details and invariants:
-
-→ [docs/adr/ADR-039.md](docs/adr/ADR-039.md)
 
 **Memory Integration**
 - [ADR-026 — Retrieval Semantics & Contract](docs/adr/ADR-026.md)
