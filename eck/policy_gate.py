@@ -126,6 +126,13 @@ class DefaultPolicyGate:
     interpreted.
 
     Pure logic, deterministic, side-effect free.
+
+    Domain scope:
+    This gate is intentionally domain-agnostic. It does not inspect
+    context.environment, context.safety_level, or any domain-specific
+    fields. ADR-044 out-of-domain semantics do not apply here because
+    this gate has no intended domain — it is a confidence-only baseline
+    valid in any deployment context.
     """
 
     HALT_THRESHOLD = 0.40
