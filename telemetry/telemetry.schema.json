@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ECK Telemetry Event",
+  "description": "Canonical telemetry event envelope for the Epistemic Control Kernel (ADR-045)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_type",
+    "version",
+    "timestamp",
+    "trace_id",
+    "step_id",
+    "deterministic_nonce",
+    "severity",
+    "source",
+    "payload"
+  ],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "step.start",
+        "step.end",
+        "action.proposed",
+        "policy.evaluate",
+        "action.executed",
+        "epistemic.signal"
+      ],
+      "description": "Canonical event name"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Telemetry schema version (e.g. '1.0')"
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Wall-clock time (seconds since epoch). Observational only."
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier for a full agent run"
+    },
+    "step_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier for a single step() cycle"
+    },
+    "deterministic_nonce": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic integer derived from kernel state progression"
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "description": "Event severity level"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Component emitting the event"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-specific structured payload",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["event_type"],
+        "properties": {
+          "event_type": { "const": "epistemic.signal" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["confidence", "category", "updated"],
+            "properties": {
+              "confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "category": {
+                "type": "string",
+                "enum": [
+                  "success",
+                  "failure",
+                  "partial",
+                  "rejected",
+                  "deferred"
+                ]
+              },
+              "severity": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "updated": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  ]
+}
