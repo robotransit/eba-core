@@ -1,4 +1,3 @@
-```python
 # eck/demo_policy_gate.py
 """
 Demonstration childcare policy module for the Epistemic Control Kernel (ECK).
@@ -176,4 +175,3 @@ class DemoPolicyGate:
             reason=f"Confidence {confidence:.2f} sufficient for execution",
             rule_id="RULE_005",
         )
-```
