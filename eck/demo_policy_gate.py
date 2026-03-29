@@ -26,11 +26,10 @@ from .policy_gate import (
     PolicyCause,
     PolicyContext,
     PolicyDecision,
-    PolicyGate,
 )
 
 
-class DemoPolicyGate(PolicyGate):
+class DemoPolicyGate:
     """Deterministic reference implementation of the PolicyGate contract."""
 
     def evaluate(
