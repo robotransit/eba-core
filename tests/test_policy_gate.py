@@ -15,15 +15,39 @@ from eck.policy_gate import (
 )
 
 
-class TestPolicyGateBase(unittest.TestCase):
-    """Base PolicyGate contract — evaluate() raises NotImplementedError."""
+class TestPolicyGateProtocol(unittest.TestCase):
+    """PolicyGate Protocol contract — structural typing verification."""
 
-    def test_base_evaluate_raises_not_implemented(self) -> None:
-        """Direct instantiation of PolicyGate raises NotImplementedError on evaluate()."""
-        gate = PolicyGate()
-        context = PolicyContext()
-        with self.assertRaises(NotImplementedError):
-            gate.evaluate("action", 0.5, context)
+    def test_protocol_cannot_be_instantiated(self) -> None:
+        """PolicyGate is a Protocol and cannot be instantiated directly."""
+        with self.assertRaises(TypeError):
+            PolicyGate()
+
+    def test_compliant_class_satisfies_protocol(self) -> None:
+        """A class with the correct evaluate() signature satisfies PolicyGate."""
+        class MinimalGate:
+            def evaluate(self, proposed_action, confidence, context):
+                return PolicyDecision(
+                    mode=ExecutionMode.EXECUTE,
+                    cause=PolicyCause.CONFIDENCE,
+                    reason="test",
+                    rule_id="RULE_TEST",
+                )
+
+        gate = MinimalGate()
+        self.assertIsInstance(gate, PolicyGate)
+
+    def test_non_compliant_class_does_not_satisfy_protocol(self) -> None:
+        """A class without evaluate() does not satisfy the PolicyGate Protocol."""
+        class NotAGate:
+            pass
+
+        self.assertNotIsInstance(NotAGate(), PolicyGate)
+
+    def test_default_policy_gate_satisfies_protocol(self) -> None:
+        """DefaultPolicyGate satisfies the PolicyGate Protocol structurally."""
+        gate = DefaultPolicyGate()
+        self.assertIsInstance(gate, PolicyGate)
 
 
 class TestDefaultPolicyGate(unittest.TestCase):
