@@ -1,4 +1,3 @@
-```python
 # tests/test_telemetry.py
 """Tests for the ADR-045 telemetry foundation module."""
 
@@ -552,4 +551,3 @@ class TestTelemetryModuleConstants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-```
