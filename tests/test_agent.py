@@ -982,7 +982,12 @@ class TestRunMethod(unittest.TestCase):
     """run() — iterates step() until halt or max_iterations."""
 
     def test_run_stops_when_step_returns_false(self) -> None:
-        """run() stops when step() returns False."""
+        """run() stops after one completed step when goal completion fires.
+
+        With self.cycles incremented inside _end(), a started step always
+        counts as a completed cycle. One step completes and halts via goal
+        completion, so a.cycles == 1 after run() returns.
+        """
         import eck.agent as agent_mod
 
         a = _agent(goal_completion_threshold=0.0)
@@ -1002,7 +1007,7 @@ class TestRunMethod(unittest.TestCase):
             a.seed("x")
             a.run()
 
-        self.assertEqual(a.cycles, 0)
+        self.assertEqual(a.cycles, 1)
 
     def test_run_respects_max_iterations(self) -> None:
         """run() stops after max_iterations cycles."""
