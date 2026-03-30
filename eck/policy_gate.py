@@ -25,8 +25,13 @@ the contract.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Any, NamedTuple, Protocol, runtime_checkable
+
+from .telemetry import emit_event
+
+logger = logging.getLogger("eck-core")
 
 
 class ExecutionMode(Enum):
@@ -103,6 +108,10 @@ class PolicyGate(Protocol):
         proposed_action: Any,
         confidence: float,
         context: PolicyContext,
+        *,
+        trace_id: str | None = None,
+        step_id: str | None = None,
+        deterministic_nonce: int | None = None,
     ) -> PolicyDecision:
         """
         Evaluate the proposed action based on confidence and context.
@@ -148,6 +157,10 @@ class DefaultPolicyGate:
         proposed_action: Any,
         confidence: float,
         context: PolicyContext,
+        *,
+        trace_id: str | None = None,
+        step_id: str | None = None,
+        deterministic_nonce: int | None = None,
     ) -> PolicyDecision:
         """Default conservative evaluation logic."""
         # Strict validation (bool explicitly excluded)
@@ -161,18 +174,53 @@ class DefaultPolicyGate:
                 "Must be int/float in [0.0, 1.0] and not bool."
             )
 
+        def _emit(decision: PolicyDecision) -> PolicyDecision:
+            """Emit policy.evaluate telemetry and return the decision unchanged."""
+            if (
+                trace_id is None
+                or step_id is None
+                or deterministic_nonce is None
+            ):
+                return decision
+
+            payload: dict[str, Any] = {
+                "mode": decision.mode.name,
+                "cause": decision.cause.name,
+                "rule_id": decision.rule_id,
+                "reason": decision.reason,
+                "confidence": confidence,
+                "failure_window_active": context.failure_window_active,
+                "environment": context.environment,
+                "safety_level": context.safety_level,
+            }
+            action_type = getattr(proposed_action, "action_type", None)
+            if action_type is not None:
+                payload["action_type"] = action_type
+
+            emit_event(
+                "policy.evaluate",
+                trace_id=trace_id,
+                step_id=step_id,
+                deterministic_nonce=deterministic_nonce,
+                severity="INFO",
+                source="policy_gate",
+                payload=payload,
+                logger=logger,
+            )
+            return decision
+
         # Rule 001: Failure window active -> immediate HALT
         if context.failure_window_active:
-            return PolicyDecision(
+            return _emit(PolicyDecision(
                 mode=ExecutionMode.HALT,
                 cause=PolicyCause.FAILURE_WINDOW,
                 reason="Failure window active — immediate halt required",
                 rule_id="RULE_001",
-            )
+            ))
 
         # Rule 002: Very low confidence -> HALT
         if confidence < self.HALT_THRESHOLD:
-            return PolicyDecision(
+            return _emit(PolicyDecision(
                 mode=ExecutionMode.HALT,
                 cause=PolicyCause.CONFIDENCE,
                 reason=(
@@ -180,11 +228,11 @@ class DefaultPolicyGate:
                     f"{self.HALT_THRESHOLD}"
                 ),
                 rule_id="RULE_002",
-            )
+            ))
 
         # Rule 003: Moderate uncertainty -> RETRY
         if confidence < self.RETRY_THRESHOLD:
-            return PolicyDecision(
+            return _emit(PolicyDecision(
                 mode=ExecutionMode.RETRY,
                 cause=PolicyCause.CONFIDENCE,
                 reason=(
@@ -192,11 +240,11 @@ class DefaultPolicyGate:
                     f"{self.RETRY_THRESHOLD} — awaiting stability"
                 ),
                 rule_id="RULE_003",
-            )
+            ))
 
         # Rule 004: Borderline confidence -> DEGRADE
         if confidence < self.DEGRADE_THRESHOLD:
-            return PolicyDecision(
+            return _emit(PolicyDecision(
                 mode=ExecutionMode.DEGRADE,
                 cause=PolicyCause.CONFIDENCE,
                 reason=(
@@ -204,12 +252,12 @@ class DefaultPolicyGate:
                     f"{self.DEGRADE_THRESHOLD} — using safer fallback"
                 ),
                 rule_id="RULE_004",
-            )
+            ))
 
         # Rule 005: High confidence -> EXECUTE
-        return PolicyDecision(
+        return _emit(PolicyDecision(
             mode=ExecutionMode.EXECUTE,
             cause=PolicyCause.CONFIDENCE,
             reason=f"Confidence {confidence:.2f} sufficient for execution",
             rule_id="RULE_005",
-        )
+        ))
