@@ -1,4 +1,3 @@
-```python
 # eck/telemetry.py
 """
 Structured telemetry for the Epistemic Control Kernel (ECK).
@@ -239,4 +238,3 @@ def emit_event(
         effective_logger.warning(message, extra={"telemetry_event": event})
     elif severity == "ERROR":
         effective_logger.error(message, extra={"telemetry_event": event})
-```
