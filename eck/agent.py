@@ -25,6 +25,7 @@ from .prediction import generate_prediction
 from .task_generation import generate_subtasks
 from .execution import propose_execution, authorize_and_perform
 from .policy_gate import DefaultPolicyGate, PolicyContext, ExecutionMode, PolicyGate
+from .telemetry import emit_event, make_step_id
 from .types import ExecutionResult
 
 logger = logging.getLogger("eck-core")
@@ -63,6 +64,11 @@ class ECKAgent:
         self.llm = llm_call
         self.config = config or ECKConfig()
 
+        # Trace identifier for telemetry correlation.
+        # Safe fallback for direct step() usage; refreshed at run() start
+        # for correct per-run trace scoping.
+        self._trace_id: str = generate_id()
+
         # Current active policy mode (derived from config)
         self.current_policy_mode: PolicyMode = self.config.policy_mode
 
@@ -100,6 +106,7 @@ class ECKAgent:
         if self._enable_embeddings:
             try:  # pragma: no cover
                 from sentence_transformers import SentenceTransformer
+
                 self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
             except Exception:
                 # Silent atomic fallback
@@ -154,6 +161,9 @@ class ECKAgent:
             )
             return False
 
+        # Capture queue length at true step entry, before the active task is consumed.
+        queue_length_at_start = len(self.queue)
+
         task = self.queue.pop()
         if not task:
             logger.info("Task queue empty — nothing to do")
@@ -161,6 +171,60 @@ class ECKAgent:
 
         task_id = task["id"]
         task_text = task["text"]
+
+        # Telemetry step correlation begins only once a real task-backed step
+        # has started. Pre-start exits (HALT mode, empty queue) do not emit
+        # step.start/step.end.
+        step_nonce = self.cycles
+        step_id = make_step_id(self._trace_id, step_nonce)
+
+        emit_event(
+            "step.start",
+            trace_id=self._trace_id,
+            step_id=step_id,
+            deterministic_nonce=step_nonce,
+            severity="INFO",
+            source="agent",
+            payload={
+                "objective": self.objective,
+                "queue_length": queue_length_at_start,
+                "policy_mode": self.current_policy_mode.name,
+                "task_text": task_text,
+                "task_id": task_id,
+                "current_confidence": self._confidence.get_value(),
+            },
+            logger=logger,
+        )
+
+        def _end(
+            continued: bool,
+            *,
+            goal_satisfied: bool | None = None,
+            halt_reason: str | None = None,
+            severity: str = "INFO",
+        ) -> bool:
+            payload = {
+                "continued": continued,
+                "queue_length": len(self.queue),
+                "policy_mode": self.current_policy_mode.name,
+                "task_id": task_id,
+            }
+            if goal_satisfied is not None:
+                payload["goal_satisfied"] = goal_satisfied
+            if halt_reason is not None:
+                payload["halt_reason"] = halt_reason
+
+            emit_event(
+                "step.end",
+                trace_id=self._trace_id,
+                step_id=step_id,
+                deterministic_nonce=step_nonce,
+                severity=severity,
+                source="agent",
+                payload=payload,
+                logger=logger,
+            )
+            return continued
 
         # 1. Prediction
         # NOTE (ADR-032):
@@ -279,10 +343,12 @@ class ECKAgent:
                 "performed": execution_result.performed,
                 "partial_structure": {
                     "conflict_kind": partial_structure.conflict_kind.name,
-                    "conflict_footprint": sorted([
-                        locus.name for locus in partial_structure.conflict_footprint
-                    ]),
-                } if partial_structure else None,
+                    "conflict_footprint": sorted(
+                        [locus.name for locus in partial_structure.conflict_footprint]
+                    ),
+                }
+                if partial_structure
+                else None,
             },
         )
 
@@ -338,7 +404,11 @@ class ECKAgent:
                         **drift_snap,
                     },
                 )
-                return False
+                return _end(
+                    False,
+                    halt_reason="repeated drift detected",
+                    severity="ERROR",
+                )
         else:
             logger.info(
                 "Drift/feasibility tracking skipped — execution not performed",
@@ -373,7 +443,12 @@ class ECKAgent:
                     "critic_category": critic_outcome.category,
                 },
             )
-            return False
+            return _end(
+                False,
+                goal_satisfied=True,
+                halt_reason="goal completion predicate satisfied",
+                severity="INFO",
+            )
 
         # 6. Subtask generation (policy-gated)
         if not subtasks_suppressed:
@@ -429,12 +504,19 @@ class ECKAgent:
                         **snap,
                     },
                 )
-                return False
+                return _end(
+                    False,
+                    halt_reason="severe instability detected",
+                    severity="ERROR",
+                )
 
-        return True
+        return _end(True, severity="INFO")
 
     def run(self) -> None:
         """Run the agent until halt or max iterations."""
+        # Fresh trace identifier for each full run (ADR-045).
+        self._trace_id = generate_id()
+
         logger.info(
             "ECK run starting",
             extra={"objective": self.objective},
