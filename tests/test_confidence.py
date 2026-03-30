@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 from eck.confidence import ConfidenceSignal
 from eck.types import (
@@ -76,6 +77,25 @@ def _resolution_instability_struct() -> PartialStructure:
         conflict_kind=ConflictKind.RESOLUTION_INSTABILITY,
         conflict_footprint=frozenset([ConflictLocus.FACTUAL]),
     )
+
+
+# ── Telemetry helpers ─────────────────────────────────────────────────────────
+
+_TELEMETRY_ARGS = dict(
+    trace_id="trace-test",
+    step_id="trace-test:step:0",
+    deterministic_nonce=0,
+)
+
+
+def _get_telemetry_event(mock_logger: MagicMock) -> dict | None:
+    """Extract the telemetry_event from the most recent logger.info call."""
+    for call in reversed(mock_logger.info.call_args_list):
+        kwargs = call.kwargs if call.kwargs else {}
+        extra = kwargs.get("extra", {})
+        if "telemetry_event" in extra:
+            return extra["telemetry_event"]
+    return None
 
 
 class TestConfidenceSignalInit(unittest.TestCase):
@@ -490,6 +510,113 @@ class TestAdmissibleSignals(unittest.TestCase):
         """Admissible signals set contains 'critic'."""
         conf = ConfidenceSignal(alpha=0.3)
         self.assertIn("critic", conf._admissible_signals)
+
+
+class TestConfidenceSignalTelemetry(unittest.TestCase):
+    """ConfidenceSignal.update() — epistemic.signal telemetry emission."""
+
+    def setUp(self) -> None:
+        self.conf = ConfidenceSignal(alpha=0.3)
+
+    def test_success_update_emits_epistemic_signal_updated_true(self) -> None:
+        """Success update with telemetry args emits epistemic.signal with updated=True."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_success(severity=0.2), **_TELEMETRY_ARGS)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "epistemic.signal")
+        self.assertTrue(event["payload"]["updated"])
+        self.assertEqual(event["payload"]["category"], "success")
+        self.assertIn("confidence", event["payload"])
+        self.assertIn("prior_confidence", event["payload"])
+        self.assertIn("delta_raw", event["payload"])
+        self.assertIn("delta_smoothed", event["payload"])
+
+    def test_failure_update_emits_epistemic_signal_updated_true(self) -> None:
+        """Failure update emits epistemic.signal with updated=True."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_failure(severity=0.8), **_TELEMETRY_ARGS)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertTrue(event["payload"]["updated"])
+        self.assertEqual(event["payload"]["category"], "failure")
+
+    def test_rejected_emits_epistemic_signal_updated_false(self) -> None:
+        """Rejected outcome emits epistemic.signal with updated=False."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_rejected(), **_TELEMETRY_ARGS)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "epistemic.signal")
+        self.assertFalse(event["payload"]["updated"])
+        self.assertEqual(event["payload"]["category"], "rejected")
+        self.assertIn("confidence", event["payload"])
+        self.assertIn("prior_confidence", event["payload"])
+
+    def test_deferred_emits_epistemic_signal_updated_false(self) -> None:
+        """Deferred outcome emits epistemic.signal with updated=False."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_deferred(), **_TELEMETRY_ARGS)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["updated"])
+        self.assertEqual(event["payload"]["category"], "deferred")
+
+    def test_no_telemetry_args_does_not_emit(self) -> None:
+        """Without telemetry args, no epistemic.signal event is emitted."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_success(severity=0.2))
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNone(event)
+
+    def test_source_is_confidence(self) -> None:
+        """epistemic.signal event has source='confidence'."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_success(severity=0.2), **_TELEMETRY_ARGS)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["source"], "confidence")
+
+    def test_replay_does_not_emit_telemetry(self) -> None:
+        """replay() is telemetry-silent — no epistemic.signal events emitted."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        outcomes = [
+            (_success(severity=0.2), None),
+            (_failure(severity=0.7), None),
+            (_rejected(), None),
+        ]
+        self.conf.replay(outcomes)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNone(event)
+
+    def test_partial_update_emits_epistemic_signal_updated_true(self) -> None:
+        """Partial update emits epistemic.signal with updated=True."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(
+            _partial(severity=0.3), _evidence_struct(), **_TELEMETRY_ARGS
+        )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertTrue(event["payload"]["updated"])
+        self.assertEqual(event["payload"]["category"], "partial")
+
+    def test_severity_present_in_payload(self) -> None:
+        """severity field is present in epistemic.signal payload."""
+        mock_logger = MagicMock()
+        self.conf._logger = mock_logger
+        self.conf.update(_success(severity=0.4), **_TELEMETRY_ARGS)
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertIn("severity", event["payload"])
+        self.assertEqual(event["payload"]["severity"], 0.4)
 
 
 if __name__ == "__main__":
