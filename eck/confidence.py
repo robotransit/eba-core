@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
+from eck.telemetry import emit_event
 from eck.types import (
     ConflictKind,
     ConflictLocus,
@@ -151,11 +152,20 @@ class ConfidenceSignal:
         self,
         outcome: CriticOutcome,
         partial_structure: Optional[PartialStructure] = None,
+        *,
+        trace_id: str | None = None,
+        step_id: str | None = None,
+        deterministic_nonce: int | None = None,
     ) -> float:
         """Core update entrypoint with EWMA smoothing (ADR-025).
 
         Returns the new confidence value after applying the update.
         No update occurs for rejected/deferred outcomes (ADR-021).
+
+        Telemetry args (trace_id, step_id, deterministic_nonce) are optional.
+        When all three are supplied, an epistemic.signal event is emitted.
+        When any are None, telemetry is silently skipped.
+        replay() calls update() without telemetry args — no phantom events.
         """
         # Airtight validation — before any mutation
         if outcome.category == "partial":
@@ -173,6 +183,38 @@ class ConfidenceSignal:
         prior_value = self._value
         prior_smoothed_delta = self._last_smoothed_delta
         prior_failure_window_active = self._last_outcome_was_failure
+
+        def _emit_epistemic(
+            *,
+            updated: bool,
+            extra: dict[str, Any] | None = None,
+        ) -> None:
+            """Emit epistemic.signal telemetry if telemetry context is present."""
+            if (
+                trace_id is None
+                or step_id is None
+                or deterministic_nonce is None
+            ):
+                return
+            payload: dict[str, Any] = {
+                "confidence": self._value,
+                "category": outcome.category,
+                "updated": updated,
+                "severity": outcome.severity,
+                "prior_confidence": prior_value,
+            }
+            if extra:
+                payload.update(extra)
+            emit_event(
+                "epistemic.signal",
+                trace_id=trace_id,
+                step_id=step_id,
+                deterministic_nonce=deterministic_nonce,
+                severity="INFO",
+                source="confidence",
+                payload=payload,
+                logger=self._logger,
+            )
 
         # True no-update path for rejected / deferred (ADR-021)
         if outcome.category in ("rejected", "deferred"):
@@ -192,6 +234,7 @@ class ConfidenceSignal:
                 "failure_window_consumed": prior_failure_window_active,
                 "final_value": self._value,
             })
+            _emit_epistemic(updated=False)
             return self._value
 
         # 1. Compute raw delta
@@ -254,6 +297,14 @@ class ConfidenceSignal:
             "admissible_signals": sorted(self._admissible_signals),
         })
 
+        _emit_epistemic(
+            updated=True,
+            extra={
+                "delta_raw": delta_raw,
+                "delta_smoothed": delta_smoothed,
+            },
+        )
+
         return self._value
 
     def get_value(self) -> float:
@@ -269,6 +320,9 @@ class ConfidenceSignal:
         Runs the update sequence against the provided outcomes and returns
         the confidence trajectory, then restores original state exactly.
         Logging is suppressed during replay to avoid phantom log entries.
+        Telemetry is suppressed during replay — update() is called without
+        telemetry args so no epistemic.signal events are emitted for
+        synthetic replay trajectories.
         """
         original_value = self._value
         original_last_delta = self._last_smoothed_delta
