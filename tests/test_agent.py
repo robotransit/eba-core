@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 from eck.agent import ECKAgent
 from eck.config import ECKConfig, PolicyMode
@@ -394,6 +394,9 @@ class TestExecutionBoundary(unittest.TestCase):
             proposed_action=proposal,
             policy_mode=a.current_policy_mode,
             llm_call=dummy_llm,
+            trace_id=ANY,
+            step_id=ANY,
+            deterministic_nonce=0,
         )
 
     def test_gate_execute_result_passed_to_critic(self) -> None:
