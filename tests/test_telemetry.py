@@ -1,551 +1,688 @@
-# tests/test_telemetry.py
-"""Tests for the ADR-045 telemetry foundation module."""
+# tests/test_execution.py
+"""Tests for propose_execution() and authorize_and_perform() (ADR-042)."""
 
 from __future__ import annotations
 
+import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from eck.telemetry import (
-    ALLOWED_EVENT_TYPES,
-    ALLOWED_SEVERITIES,
-    SCHEMA_VERSION,
-    build_event,
-    emit_event,
-    make_step_id,
-    validate_event,
+from eck.config import PolicyMode
+from eck.execution import authorize_and_perform, propose_execution
+from eck.types import ExecutionResult, ProposedAction
+
+
+# ── LLM stubs ─────────────────────────────────────────────────────────────────
+
+def _llm_valid_proposal(prompt: str) -> str:
+    """Returns a valid llm_query proposal."""
+    return json.dumps({
+        "action_type": "llm_query",
+        "parameters": {"prompt": "do the thing"},
+    })
+
+
+def _llm_non_string(prompt: str):
+    """Returns a non-string response."""
+    return None
+
+
+def _llm_bad_json(prompt: str) -> str:
+    """Returns unparseable JSON."""
+    return "not json at all"
+
+
+def _llm_unwhitelisted(prompt: str) -> str:
+    """Returns a valid JSON proposal with an unwhitelisted action type."""
+    return json.dumps({
+        "action_type": "file_write",
+        "parameters": {"path": "/tmp/x", "content": "y"},
+    })
+
+
+def _llm_non_dict_parameters(prompt: str) -> str:
+    """Returns a proposal where parameters is a list, not a dict."""
+    return json.dumps({
+        "action_type": "llm_query",
+        "parameters": ["prompt", "do the thing"],
+    })
+
+
+def _llm_missing_required_params(prompt: str) -> str:
+    """Returns a valid llm_query proposal missing the required 'prompt' key."""
+    return json.dumps({
+        "action_type": "llm_query",
+        "parameters": {},
+    })
+
+
+def _make_proposal(
+    action_type: str = "llm_query",
+    parameters: dict | None = None,
+    task_text: str = "task",
+    task_id: str = "tid-001",
+    provenance_id: str = "prov-001",
+) -> ProposedAction:
+    """Construct a minimal valid ProposedAction for use in authorize tests."""
+    return ProposedAction(
+        action_type=action_type,
+        parameters=parameters if parameters is not None else {"prompt": "do the thing"},
+        task_text=task_text,
+        task_id=task_id,
+        provenance_id=provenance_id,
+    )
+
+
+def _make_proposal_ns(**kwargs) -> SimpleNamespace:
+    """Construct a SimpleNamespace proposal for testing edge cases that
+    cannot be expressed as a valid ProposedAction."""
+    defaults = dict(
+        action_type="llm_query",
+        parameters={"prompt": "do the thing"},
+        task_text="task",
+        task_id="tid-001",
+        provenance_id="prov-001",
+    )
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+# ── Telemetry helpers ─────────────────────────────────────────────────────────
+
+_TELEMETRY_ARGS = dict(
+    trace_id="trace-test",
+    step_id="trace-test:step:0",
+    deterministic_nonce=0,
 )
 
 
-def _valid_event() -> dict:
-    """Return a minimal valid telemetry event envelope."""
-    return {
-        "event_type": "step.start",
-        "version": SCHEMA_VERSION,
-        "timestamp": 1234.5,
-        "trace_id": "trace-001",
-        "step_id": "trace-001:step:1",
-        "deterministic_nonce": 1,
-        "severity": "INFO",
-        "source": "agent",
-        "payload": {"objective": "test"},
-    }
+def _get_telemetry_event(mock_logger: MagicMock) -> dict | None:
+    """Extract the telemetry_event from the most recent logger.info call."""
+    for call in reversed(mock_logger.info.call_args_list):
+        kwargs = call.kwargs if call.kwargs else {}
+        extra = kwargs.get("extra", {})
+        if "telemetry_event" in extra:
+            return extra["telemetry_event"]
+    return None
 
 
-class TestMakeStepId(unittest.TestCase):
-    """Pure deterministic step-id derivation."""
+# ─────────────────────────────────────────────────────────────────────────────
+# propose_execution tests
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def test_valid_inputs_produce_expected_step_id(self) -> None:
-        """Valid inputs return the canonical trace_id:step:nonce form."""
+class TestProposeExecutionValidPath(unittest.TestCase):
+    """propose_execution — valid proposal construction."""
+
+    def test_valid_proposal_returns_proposed_action(self) -> None:
+        """Valid LLM response returns a ProposedAction instance."""
+        result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsInstance(result, ProposedAction)
+
+    def test_valid_proposal_action_type(self) -> None:
+        """Returned ProposedAction has correct action_type."""
+        result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action_type, "llm_query")
+
+    def test_valid_proposal_parameters(self) -> None:
+        """Returned ProposedAction carries the parsed parameters dict."""
+        result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result.parameters, dict)
+        self.assertIn("prompt", result.parameters)
+
+    def test_valid_proposal_task_text(self) -> None:
+        """Returned ProposedAction carries the originating task_text."""
+        result = propose_execution("my task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.task_text, "my task")
+
+    def test_valid_proposal_task_id_preserved(self) -> None:
+        """Returned ProposedAction carries the supplied task_id."""
+        result = propose_execution("task", _llm_valid_proposal, task_id="tid-abc")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.task_id, "tid-abc")
+
+    def test_valid_proposal_provenance_id_non_empty(self) -> None:
+        """Returned ProposedAction has a non-empty provenance_id."""
+        result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.provenance_id.strip())
+
+    def test_task_id_generated_when_not_provided(self) -> None:
+        """When task_id is not provided, a non-empty ID is generated."""
+        result = propose_execution("task", _llm_valid_proposal)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.task_id.strip())
+
+    def test_proposal_is_immutable(self) -> None:
+        """Returned ProposedAction is a frozen dataclass — mutation raises."""
+        result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNotNone(result)
+        with self.assertRaises((AttributeError, TypeError)):
+            result.action_type = "mutated"
+
+
+class TestProposeExecutionFailClosed(unittest.TestCase):
+    """propose_execution — fail-closed on all invalid inputs."""
+
+    def test_non_string_llm_response_returns_none(self) -> None:
+        """Non-string LLM response → None."""
+        result = propose_execution("task", _llm_non_string, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_bad_json_returns_none(self) -> None:
+        """Unparseable JSON response → None."""
+        result = propose_execution("task", _llm_bad_json, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_empty_string_response_returns_none(self) -> None:
+        """Empty string response → None."""
+        result = propose_execution("task", lambda p: "", task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_unwhitelisted_action_type_returns_none(self) -> None:
+        """Unwhitelisted action_type → None."""
+        result = propose_execution("task", _llm_unwhitelisted, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_non_dict_parameters_returns_none(self) -> None:
+        """Parameters that is not a dict → None."""
+        result = propose_execution("task", _llm_non_dict_parameters, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_missing_required_parameter_keys_returns_none(self) -> None:
+        """Missing required parameter keys → None."""
+        result = propose_execution("task", _llm_missing_required_params, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_proposed_action_construction_failure_returns_none(self) -> None:
+        """ProposedAction construction raising ValueError → None (fail closed)."""
+        with patch("eck.execution.ProposedAction", side_effect=ValueError("construction failed")):
+            result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_proposed_action_construction_type_error_returns_none(self) -> None:
+        """ProposedAction construction raising TypeError → None (fail closed)."""
+        with patch("eck.execution.ProposedAction", side_effect=TypeError("type error")):
+            result = propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        self.assertIsNone(result)
+
+    def test_none_return_is_not_system_halt(self) -> None:
+        """None return from propose_execution is a per-cycle no-op, not a halt.
+        Verified by calling twice — second call still works normally."""
+        result1 = propose_execution("task", _llm_bad_json, task_id="tid-001")
+        self.assertIsNone(result1)
+        result2 = propose_execution("task", _llm_valid_proposal, task_id="tid-002")
+        self.assertIsNotNone(result2)
+
+
+class TestProposeExecutionTelemetry(unittest.TestCase):
+    """propose_execution — action.proposed telemetry emission."""
+
+    def test_valid_proposal_emits_action_proposed_present(self) -> None:
+        """Valid proposal with telemetry args emits action.proposed with proposal_present=True."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "action.proposed")
+        self.assertTrue(event["payload"]["proposal_present"])
+        self.assertEqual(event["payload"]["action_type"], "llm_query")
+        self.assertIn("task_id", event["payload"])
+        self.assertIn("provenance_id", event["payload"])
+        self.assertIn("parameter_keys", event["payload"])
+
+    def test_valid_proposal_parameter_keys_sorted(self) -> None:
+        """parameter_keys in action.proposed payload are sorted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        keys = event["payload"]["parameter_keys"]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_non_string_response_emits_llm_non_string_response(self) -> None:
+        """Non-string LLM response emits proposal_refusal_reason=llm_non_string_response."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_non_string, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
         self.assertEqual(
-            make_step_id("trace-abc", 12),
-            "trace-abc:step:12",
+            event["payload"]["proposal_refusal_reason"],
+            "llm_non_string_response",
         )
 
-    def test_empty_trace_id_raises(self) -> None:
-        """Empty trace_id raises ValueError."""
-        with self.assertRaises(ValueError):
-            make_step_id("", 1)
-
-    def test_whitespace_trace_id_raises(self) -> None:
-        """Whitespace-only trace_id raises ValueError."""
-        with self.assertRaises(ValueError):
-            make_step_id("   ", 1)
-
-    def test_non_integer_nonce_raises(self) -> None:
-        """Non-int deterministic_nonce raises ValueError."""
-        with self.assertRaises(ValueError):
-            make_step_id("trace-abc", 1.5)
-
-    def test_bool_nonce_raises(self) -> None:
-        """Bool deterministic_nonce raises ValueError."""
-        with self.assertRaises(ValueError):
-            make_step_id("trace-abc", True)
-
-    def test_negative_nonce_raises(self) -> None:
-        """Negative deterministic_nonce raises ValueError."""
-        with self.assertRaises(ValueError):
-            make_step_id("trace-abc", -1)
-
-
-class TestValidateEvent(unittest.TestCase):
-    """Envelope validation for ADR-045."""
-
-    def test_valid_event_passes(self) -> None:
-        """A conformant event envelope validates without error."""
-        validate_event(_valid_event())
-
-    def test_non_dict_event_raises(self) -> None:
-        """Non-dict event raises ValueError."""
-        with self.assertRaises(ValueError):
-            validate_event("not_a_dict")  # type: ignore[arg-type]
-
-    def test_missing_required_keys_raise(self) -> None:
-        """Missing required envelope keys raise ValueError."""
-        event = _valid_event()
-        del event["payload"]
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_invalid_event_type_raises(self) -> None:
-        """Unknown event_type raises ValueError."""
-        event = _valid_event()
-        event["event_type"] = "not.real"
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_invalid_severity_raises(self) -> None:
-        """Unknown severity raises ValueError."""
-        event = _valid_event()
-        event["severity"] = "TRACE"
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_non_string_version_raises(self) -> None:
-        """Non-string version raises ValueError."""
-        event = _valid_event()
-        event["version"] = 1  # type: ignore[assignment]
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_bool_timestamp_raises(self) -> None:
-        """Bool timestamp raises ValueError."""
-        event = _valid_event()
-        event["timestamp"] = True
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_string_timestamp_raises(self) -> None:
-        """Non-numeric timestamp raises ValueError."""
-        event = _valid_event()
-        event["timestamp"] = "1234.5"  # type: ignore[assignment]
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_empty_trace_id_raises(self) -> None:
-        """Empty trace_id raises ValueError."""
-        event = _valid_event()
-        event["trace_id"] = ""
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_empty_step_id_raises(self) -> None:
-        """Empty step_id raises ValueError."""
-        event = _valid_event()
-        event["step_id"] = ""
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_empty_source_raises(self) -> None:
-        """Empty source raises ValueError."""
-        event = _valid_event()
-        event["source"] = ""
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_negative_deterministic_nonce_raises(self) -> None:
-        """Negative deterministic_nonce raises ValueError."""
-        event = _valid_event()
-        event["deterministic_nonce"] = -1
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_bool_deterministic_nonce_raises(self) -> None:
-        """Bool deterministic_nonce raises ValueError."""
-        event = _valid_event()
-        event["deterministic_nonce"] = False
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-    def test_non_dict_payload_raises(self) -> None:
-        """Non-dict payload raises ValueError."""
-        event = _valid_event()
-        event["payload"] = ["not", "a", "dict"]  # type: ignore[assignment]
-        with self.assertRaises(ValueError):
-            validate_event(event)
-
-
-class TestBuildEvent(unittest.TestCase):
-    """Envelope construction with validation and optional redaction."""
-
-    def test_valid_inputs_produce_valid_event(self) -> None:
-        """build_event returns a validated envelope with expected fields."""
-        event = build_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:3",
-            deterministic_nonce=3,
-            severity="INFO",
-            source="agent",
-            payload={"objective": "test"},
-            timestamp=1234.5,
-        )
-
-        self.assertEqual(event["event_type"], "step.start")
-        self.assertEqual(event["version"], SCHEMA_VERSION)
-        self.assertEqual(event["timestamp"], 1234.5)
-        self.assertEqual(event["trace_id"], "trace-abc")
-        self.assertEqual(event["step_id"], "trace-abc:step:3")
-        self.assertEqual(event["deterministic_nonce"], 3)
-        self.assertEqual(event["severity"], "INFO")
-        self.assertEqual(event["source"], "agent")
-        self.assertEqual(event["payload"], {"objective": "test"})
-
-    def test_timestamp_defaults_to_time_time_when_not_supplied(self) -> None:
-        """timestamp defaults to time.time() when omitted."""
-        with patch("eck.telemetry.time.time", return_value=9876.5):
-            event = build_event(
-                "step.start",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
+    def test_bad_json_emits_json_parse_failure(self) -> None:
+        """Unparseable JSON emits proposal_refusal_reason=json_parse_failure."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_bad_json, task_id="tid-001",
+                **_TELEMETRY_ARGS,
             )
-
-        self.assertEqual(event["timestamp"], 9876.5)
-
-    def test_explicit_timestamp_is_preserved_exactly(self) -> None:
-        """Explicit timestamp bypasses time.time() and is preserved exactly."""
-        with patch("eck.telemetry.time.time", return_value=9999.9):
-            event = build_event(
-                "step.start",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
-                timestamp=1111.25,
-            )
-
-        self.assertEqual(event["timestamp"], 1111.25)
-
-    def test_payload_is_copied_not_reused_by_reference(self) -> None:
-        """Mutating the original payload after build_event does not affect the event."""
-        payload = {"objective": "before"}
-        event = build_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload=payload,
-            timestamp=1234.5,
-        )
-
-        payload["objective"] = "after"
-        self.assertEqual(event["payload"]["objective"], "before")
-
-    def test_version_override_works(self) -> None:
-        """Explicit version override is preserved."""
-        event = build_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload={"objective": "test"},
-            version="2.0",
-            timestamp=1234.5,
-        )
-        self.assertEqual(event["version"], "2.0")
-
-    def test_redact_hook_is_applied(self) -> None:
-        """redact_hook transforms the payload before validation/emission."""
-        def hook(payload: dict) -> dict:
-            redacted = dict(payload)
-            redacted["secret"] = "[REDACTED]"
-            return redacted
-
-        event = build_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload={"secret": "raw"},
-            timestamp=1234.5,
-            redact_hook=hook,
-        )
-        self.assertEqual(event["payload"]["secret"], "[REDACTED]")
-
-    def test_redact_hook_returning_non_dict_raises(self) -> None:
-        """redact_hook must return a dict."""
-        def bad_hook(payload: dict) -> list:
-            return ["not", "a", "dict"]
-
-        with self.assertRaises(ValueError):
-            build_event(
-                "step.start",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
-                timestamp=1234.5,
-                redact_hook=bad_hook,  # type: ignore[arg-type]
-            )
-
-    def test_invalid_inputs_propagate_through_validation(self) -> None:
-        """build_event surfaces validation errors from invalid envelope content."""
-        with self.assertRaises(ValueError):
-            build_event(
-                "not.real",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
-                timestamp=1234.5,
-            )
-
-    def test_non_dict_payload_raises_before_validation(self) -> None:
-        """payload must be a dict before any envelope is built."""
-        with self.assertRaises(ValueError):
-            build_event(
-                "step.start",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload=["not", "a", "dict"],  # type: ignore[arg-type]
-                timestamp=1234.5,
-            )
-
-
-class TestEmitEvent(unittest.TestCase):
-    """Logging emission wrapper for telemetry events."""
-
-    def test_valid_inputs_emit_without_error(self) -> None:
-        """emit_event emits a valid event without raising."""
-        logger = MagicMock()
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload={"objective": "test"},
-            logger=logger,
-        )
-        logger.info.assert_called_once()
-
-    def test_debug_severity_dispatches_to_debug_only(self) -> None:
-        """DEBUG severity dispatches to logger.debug only."""
-        logger = MagicMock()
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="DEBUG",
-            source="agent",
-            payload={"objective": "test"},
-            logger=logger,
-        )
-        logger.debug.assert_called_once()
-        logger.info.assert_not_called()
-        logger.warning.assert_not_called()
-        logger.error.assert_not_called()
-
-    def test_info_severity_dispatches_to_info_only(self) -> None:
-        """INFO severity dispatches to logger.info only."""
-        logger = MagicMock()
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload={"objective": "test"},
-            logger=logger,
-        )
-        logger.debug.assert_not_called()
-        logger.info.assert_called_once()
-        logger.warning.assert_not_called()
-        logger.error.assert_not_called()
-
-    def test_warning_severity_dispatches_to_warning_only(self) -> None:
-        """WARNING severity dispatches to logger.warning only."""
-        logger = MagicMock()
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="WARNING",
-            source="agent",
-            payload={"objective": "test"},
-            logger=logger,
-        )
-        logger.debug.assert_not_called()
-        logger.info.assert_not_called()
-        logger.warning.assert_called_once()
-        logger.error.assert_not_called()
-
-    def test_error_severity_dispatches_to_error_only(self) -> None:
-        """ERROR severity dispatches to logger.error only."""
-        logger = MagicMock()
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="ERROR",
-            source="agent",
-            payload={"objective": "test"},
-            logger=logger,
-        )
-        logger.debug.assert_not_called()
-        logger.info.assert_not_called()
-        logger.warning.assert_not_called()
-        logger.error.assert_called_once()
-
-    def test_emitted_message_string_is_correct(self) -> None:
-        """The emitted log message matches the canonical telemetry format."""
-        logger = MagicMock()
-        emit_event(
-            "policy.evaluate",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:2",
-            deterministic_nonce=2,
-            severity="INFO",
-            source="policy_gate",
-            payload={"mode": "EXECUTE"},
-            logger=logger,
-        )
-
-        args, kwargs = logger.info.call_args
-        self.assertEqual(args[0], "telemetry event emitted: policy.evaluate")
-
-    def test_telemetry_event_key_present_in_extra(self) -> None:
-        """Telemetry envelope is attached under extra['telemetry_event']."""
-        logger = MagicMock()
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload={"objective": "test"},
-            logger=logger,
-        )
-
-        _, kwargs = logger.info.call_args
-        self.assertIn("extra", kwargs)
-        self.assertIn("telemetry_event", kwargs["extra"])
-
-    def test_custom_logger_is_used_when_provided(self) -> None:
-        """Explicit logger is used instead of the default eck-core logger."""
-        logger = MagicMock()
-        with patch("eck.telemetry.logging.getLogger") as mock_get_logger:
-            emit_event(
-                "step.start",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
-                logger=logger,
-            )
-
-        logger.info.assert_called_once()
-        mock_get_logger.assert_not_called()
-
-    def test_default_eck_core_logger_used_when_none_provided(self) -> None:
-        """emit_event defaults to logging.getLogger('eck-core')."""
-        default_logger = MagicMock()
-        with patch("eck.telemetry.logging.getLogger", return_value=default_logger) as mock_get_logger:
-            emit_event(
-                "step.start",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
-            )
-
-        mock_get_logger.assert_called_once_with("eck-core")
-        default_logger.info.assert_called_once()
-
-    def test_redact_hook_is_passed_through_to_build_event(self) -> None:
-        """emit_event forwards redact_hook to build_event."""
-        logger = MagicMock()
-
-        def hook(payload: dict) -> dict:
-            redacted = dict(payload)
-            redacted["secret"] = "[REDACTED]"
-            return redacted
-
-        emit_event(
-            "step.start",
-            trace_id="trace-abc",
-            step_id="trace-abc:step:1",
-            deterministic_nonce=1,
-            severity="INFO",
-            source="agent",
-            payload={"secret": "raw"},
-            logger=logger,
-            redact_hook=hook,
-        )
-
-        _, kwargs = logger.info.call_args
-        event = kwargs["extra"]["telemetry_event"]
-        self.assertEqual(event["payload"]["secret"], "[REDACTED]")
-
-    def test_build_event_validation_failures_propagate(self) -> None:
-        """emit_event does not swallow build_event/validation failures."""
-        logger = MagicMock()
-        with self.assertRaises(ValueError):
-            emit_event(
-                "not.real",
-                trace_id="trace-abc",
-                step_id="trace-abc:step:1",
-                deterministic_nonce=1,
-                severity="INFO",
-                source="agent",
-                payload={"objective": "test"},
-                logger=logger,
-            )
-
-
-class TestTelemetryModuleConstants(unittest.TestCase):
-    """Sanity checks for exported telemetry constants."""
-
-    def test_allowed_event_types_contains_all_v1_events(self) -> None:
-        """ALLOWED_EVENT_TYPES contains exactly the ADR-045 v1 event names."""
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
         self.assertEqual(
-            ALLOWED_EVENT_TYPES,
-            frozenset(
-                {
-                    "step.start",
-                    "step.end",
-                    "action.proposed",
-                    "policy.evaluate",
-                    "action.executed",
-                    "epistemic.signal",
-                }
+            event["payload"]["proposal_refusal_reason"],
+            "json_parse_failure",
+        )
+
+    def test_unwhitelisted_action_type_emits_action_type_not_whitelisted(self) -> None:
+        """Unwhitelisted action_type emits proposal_refusal_reason=action_type_not_whitelisted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_unwhitelisted, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "action_type_not_whitelisted",
+        )
+
+    def test_non_dict_parameters_emits_parameters_not_dict(self) -> None:
+        """Non-dict parameters emits proposal_refusal_reason=parameters_not_dict."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_non_dict_parameters, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "parameters_not_dict",
+        )
+
+    def test_missing_required_params_emits_missing_required_parameters(self) -> None:
+        """Missing required params emits proposal_refusal_reason=missing_required_parameters."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_missing_required_params, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "missing_required_parameters",
+        )
+
+    def test_construction_failure_emits_construction_failure(self) -> None:
+        """ProposedAction construction failure emits proposal_refusal_reason=construction_failure."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger), \
+             patch("eck.execution.ProposedAction", side_effect=ValueError("fail")):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "construction_failure",
+        )
+
+    def test_no_telemetry_args_does_not_emit(self) -> None:
+        """Without telemetry args, no action.proposed event is emitted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNone(event)
+
+    def test_source_is_execution(self) -> None:
+        """action.proposed event has source='execution'."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["source"], "execution")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# authorize_and_perform tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAuthorizeAndPerformInvariantViolations(unittest.TestCase):
+    """authorize_and_perform — invariant violations raise AssertionError."""
+
+    def test_none_proposal_raises_assertion_error(self) -> None:
+        """proposed_action=None raises AssertionError (INV3 — non-compliant caller)."""
+        with self.assertRaises(AssertionError):
+            authorize_and_perform(
+                proposed_action=None,
+                policy_mode=PolicyMode.NORMAL,
+            )
+
+    def test_halt_mode_raises_assertion_error(self) -> None:
+        """policy_mode=HALT raises AssertionError (INV6 — non-compliant caller)."""
+        with self.assertRaises(AssertionError):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.HALT,
+            )
+
+    def test_none_proposal_does_not_return_execution_result(self) -> None:
+        """None proposal raises — does not return a refused ExecutionResult."""
+        try:
+            authorize_and_perform(
+                proposed_action=None,
+                policy_mode=PolicyMode.NORMAL,
+            )
+            self.fail("Expected AssertionError was not raised")
+        except AssertionError:
+            pass
+        except Exception as e:
+            self.fail(f"Expected AssertionError, got {type(e).__name__}: {e}")
+
+
+class TestAuthorizeAndPerformContractRefusals(unittest.TestCase):
+    """authorize_and_perform — contract-level refusals return ExecutionResult."""
+
+    def test_unwhitelisted_action_type_returns_refused(self) -> None:
+        """Unwhitelisted action_type → performed=False."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(action_type="file_write"),
+            policy_mode=PolicyMode.NORMAL,
+        )
+        self.assertFalse(result.performed)
+        self.assertEqual(result.refusal_reason, "action_type_not_whitelisted")
+
+    def test_unwhitelisted_action_type_outcome_empty(self) -> None:
+        """Unwhitelisted action_type → outcome is empty string."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(action_type="file_write"),
+            policy_mode=PolicyMode.NORMAL,
+        )
+        self.assertEqual(result.outcome, "")
+
+    def test_missing_required_parameter_returns_refused(self) -> None:
+        """Missing required parameter key → performed=False."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(parameters={}),
+            policy_mode=PolicyMode.NORMAL,
+        )
+        self.assertFalse(result.performed)
+        self.assertIn("missing_required_parameters", result.refusal_reason)
+
+    def test_missing_required_parameter_outcome_empty(self) -> None:
+        """Missing required parameter key → outcome is empty string."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(parameters={}),
+            policy_mode=PolicyMode.NORMAL,
+        )
+        self.assertEqual(result.outcome, "")
+
+    def test_llm_call_not_provided_returns_refused(self) -> None:
+        """llm_query without llm_call → performed=False."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=None,
+        )
+        self.assertFalse(result.performed)
+        self.assertEqual(result.refusal_reason, "llm_call_not_provided")
+
+    def test_llm_query_non_string_response_returns_refused(self) -> None:
+        """llm_query where LLM returns non-string → performed=False."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: None,
+        )
+        self.assertFalse(result.performed)
+        self.assertEqual(result.refusal_reason, "llm_query_non_string_response")
+
+    def test_contract_refusal_returns_execution_result_instance(self) -> None:
+        """Contract-level refusal returns an ExecutionResult instance."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(action_type="file_write"),
+            policy_mode=PolicyMode.NORMAL,
+        )
+        self.assertIsInstance(result, ExecutionResult)
+
+    def test_contract_refusal_never_raises(self) -> None:
+        """Contract-level refusals return ExecutionResult — never raise."""
+        try:
+            result = authorize_and_perform(
+                proposed_action=_make_proposal(parameters={}),
+                policy_mode=PolicyMode.NORMAL,
+            )
+            self.assertIsInstance(result, ExecutionResult)
+        except Exception as e:
+            self.fail(
+                f"Contract refusal should not raise — got {type(e).__name__}: {e}"
+            )
+
+
+class TestAuthorizeAndPerformSuccessPath(unittest.TestCase):
+    """authorize_and_perform — successful llm_query execution."""
+
+    def test_llm_query_returns_performed_true(self) -> None:
+        """Successful llm_query → performed=True."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "the result",
+        )
+        self.assertTrue(result.performed)
+
+    def test_llm_query_refusal_reason_none(self) -> None:
+        """Successful llm_query → refusal_reason is None."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "the result",
+        )
+        self.assertIsNone(result.refusal_reason)
+
+    def test_llm_query_outcome_matches_llm_response(self) -> None:
+        """Successful llm_query → outcome carries normalised LLM response."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "the result",
+        )
+        self.assertEqual(result.outcome, "the result")
+
+    def test_llm_query_outcome_whitespace_normalised(self) -> None:
+        """Successful llm_query → outcome has internal whitespace normalised."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "  messy   whitespace  response  ",
+        )
+        self.assertEqual(result.outcome, "messy whitespace response")
+
+    def test_llm_query_returns_execution_result_instance(self) -> None:
+        """Successful llm_query returns an ExecutionResult instance."""
+        result = authorize_and_perform(
+            proposed_action=_make_proposal(),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "ok",
+        )
+        self.assertIsInstance(result, ExecutionResult)
+
+    def test_llm_query_prompt_passed_to_llm(self) -> None:
+        """The prompt parameter from ProposedAction is passed to llm_call."""
+        received = {}
+
+        def capture_llm(prompt: str) -> str:
+            received["prompt"] = prompt
+            return "ok"
+
+        authorize_and_perform(
+            proposed_action=_make_proposal(
+                parameters={"prompt": "specific prompt text"}
             ),
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=capture_llm,
+        )
+        self.assertEqual(received.get("prompt"), "specific prompt text")
+
+    def test_non_halt_policy_modes_permit_execution(self) -> None:
+        """NORMAL, GUIDED, and ENFORCED policy modes all permit execution."""
+        for mode in (PolicyMode.NORMAL, PolicyMode.GUIDED, PolicyMode.ENFORCED):
+            with self.subTest(mode=mode):
+                result = authorize_and_perform(
+                    proposed_action=_make_proposal(),
+                    policy_mode=mode,
+                    llm_call=lambda p: "ok",
+                )
+                self.assertTrue(result.performed)
+
+
+class TestAuthorizeAndPerformDeterminism(unittest.TestCase):
+    """authorize_and_perform — deterministic replay."""
+
+    def test_identical_inputs_produce_identical_results(self) -> None:
+        """Identical ProposedAction and policy state → identical ExecutionResult."""
+        proposal = _make_proposal()
+
+        result1 = authorize_and_perform(
+            proposed_action=proposal,
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "fixed response",
+        )
+        result2 = authorize_and_perform(
+            proposed_action=proposal,
+            policy_mode=PolicyMode.NORMAL,
+            llm_call=lambda p: "fixed response",
+        )
+        self.assertEqual(result1, result2)
+
+
+class TestAuthorizeAndPerformTelemetry(unittest.TestCase):
+    """authorize_and_perform — action.executed telemetry emission."""
+
+    def test_performed_execution_emits_action_executed_performed_true(self) -> None:
+        """Successful execution with telemetry args emits action.executed with performed=True."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=lambda p: "ok",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "action.executed")
+        self.assertTrue(event["payload"]["performed"])
+        self.assertEqual(event["payload"]["outcome"], "ok")
+        self.assertIn("action_type", event["payload"])
+        self.assertIn("task_id", event["payload"])
+        self.assertIn("provenance_id", event["payload"])
+
+    def test_contract_refusal_emits_action_executed_performed_false(self) -> None:
+        """Contract refusal with telemetry args emits action.executed with performed=False."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(action_type="file_write"),
+                policy_mode=PolicyMode.NORMAL,
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "action.executed")
+        self.assertFalse(event["payload"]["performed"])
+        self.assertIn("refusal_reason", event["payload"])
+        self.assertEqual(
+            event["payload"]["refusal_reason"],
+            "action_type_not_whitelisted",
         )
 
-    def test_allowed_severities_contains_all_v1_levels(self) -> None:
-        """ALLOWED_SEVERITIES contains exactly the supported log levels."""
+    def test_no_telemetry_args_does_not_emit(self) -> None:
+        """Without telemetry args, no action.executed event is emitted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=lambda p: "ok",
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNone(event)
+
+    def test_source_is_execution(self) -> None:
+        """action.executed event has source='execution'."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=lambda p: "ok",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["source"], "execution")
+
+    def test_missing_provenance_id_emits_refused(self) -> None:
+        """Missing provenance_id emits action.executed with performed=False."""
+        mock_logger = MagicMock()
+        proposal = _make_proposal_ns(provenance_id="   ")
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=proposal,
+                policy_mode=PolicyMode.NORMAL,
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["performed"])
         self.assertEqual(
-            ALLOWED_SEVERITIES,
-            frozenset({"DEBUG", "INFO", "WARNING", "ERROR"}),
+            event["payload"]["refusal_reason"],
+            "missing_provenance_id",
+        )
+
+    def test_llm_call_not_provided_emits_refused(self) -> None:
+        """llm_call=None emits action.executed with performed=False."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=None,
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["performed"])
+        self.assertEqual(
+            event["payload"]["refusal_reason"],
+            "llm_call_not_provided",
         )
 
 
