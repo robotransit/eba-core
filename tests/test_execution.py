@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from eck.config import PolicyMode
 from eck.execution import authorize_and_perform, propose_execution
@@ -71,6 +71,25 @@ def _make_proposal(
         task_id=task_id,
         provenance_id=provenance_id,
     )
+
+
+# ── Telemetry helpers ─────────────────────────────────────────────────────────
+
+_TELEMETRY_ARGS = dict(
+    trace_id="trace-test",
+    step_id="trace-test:step:0",
+    deterministic_nonce=0,
+)
+
+
+def _get_telemetry_event(mock_logger: MagicMock) -> dict | None:
+    """Extract the telemetry_event from the most recent logger.info call."""
+    for call in reversed(mock_logger.info.call_args_list):
+        kwargs = call.kwargs if call.kwargs else {}
+        extra = kwargs.get("extra", {})
+        if "telemetry_event" in extra:
+            return extra["telemetry_event"]
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -182,6 +201,157 @@ class TestProposeExecutionFailClosed(unittest.TestCase):
         self.assertIsNone(result1)
         result2 = propose_execution("task", _llm_valid_proposal, task_id="tid-002")
         self.assertIsNotNone(result2)
+
+
+class TestProposeExecutionTelemetry(unittest.TestCase):
+    """propose_execution — action.proposed telemetry emission."""
+
+    def test_valid_proposal_emits_action_proposed_present(self) -> None:
+        """Valid proposal with telemetry args emits action.proposed with proposal_present=True."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "action.proposed")
+        self.assertTrue(event["payload"]["proposal_present"])
+        self.assertEqual(event["payload"]["action_type"], "llm_query")
+        self.assertIn("task_id", event["payload"])
+        self.assertIn("provenance_id", event["payload"])
+        self.assertIn("parameter_keys", event["payload"])
+
+    def test_valid_proposal_parameter_keys_sorted(self) -> None:
+        """parameter_keys in action.proposed payload are sorted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        keys = event["payload"]["parameter_keys"]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_non_string_response_emits_llm_non_string_response(self) -> None:
+        """Non-string LLM response emits proposal_refusal_reason=llm_non_string_response."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_non_string, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "llm_non_string_response",
+        )
+
+    def test_bad_json_emits_json_parse_failure(self) -> None:
+        """Unparseable JSON emits proposal_refusal_reason=json_parse_failure."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_bad_json, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "json_parse_failure",
+        )
+
+    def test_unwhitelisted_action_type_emits_action_type_not_whitelisted(self) -> None:
+        """Unwhitelisted action_type emits proposal_refusal_reason=action_type_not_whitelisted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_unwhitelisted, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "action_type_not_whitelisted",
+        )
+
+    def test_non_dict_parameters_emits_parameters_not_dict(self) -> None:
+        """Non-dict parameters emits proposal_refusal_reason=parameters_not_dict."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_non_dict_parameters, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "parameters_not_dict",
+        )
+
+    def test_missing_required_params_emits_missing_required_parameters(self) -> None:
+        """Missing required params emits proposal_refusal_reason=missing_required_parameters."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_missing_required_params, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "missing_required_parameters",
+        )
+
+    def test_construction_failure_emits_construction_failure(self) -> None:
+        """ProposedAction construction failure emits proposal_refusal_reason=construction_failure."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger), \
+             patch("eck.execution.ProposedAction", side_effect=ValueError("fail")):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["proposal_present"])
+        self.assertEqual(
+            event["payload"]["proposal_refusal_reason"],
+            "construction_failure",
+        )
+
+    def test_no_telemetry_args_does_not_emit(self) -> None:
+        """Without telemetry args, no action.proposed event is emitted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution("task", _llm_valid_proposal, task_id="tid-001")
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNone(event)
+
+    def test_source_is_execution(self) -> None:
+        """action.proposed event has source='execution'."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            propose_execution(
+                "task", _llm_valid_proposal, task_id="tid-001",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["source"], "execution")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -395,6 +565,110 @@ class TestAuthorizeAndPerformDeterminism(unittest.TestCase):
             llm_call=lambda p: "fixed response",
         )
         self.assertEqual(result1, result2)
+
+
+class TestAuthorizeAndPerformTelemetry(unittest.TestCase):
+    """authorize_and_perform — action.executed telemetry emission."""
+
+    def test_performed_execution_emits_action_executed_performed_true(self) -> None:
+        """Successful execution with telemetry args emits action.executed with performed=True."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=lambda p: "ok",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "action.executed")
+        self.assertTrue(event["payload"]["performed"])
+        self.assertEqual(event["payload"]["outcome"], "ok")
+        self.assertIn("action_type", event["payload"])
+        self.assertIn("task_id", event["payload"])
+        self.assertIn("provenance_id", event["payload"])
+
+    def test_contract_refusal_emits_action_executed_performed_false(self) -> None:
+        """Contract refusal with telemetry args emits action.executed with performed=False."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(action_type="file_write"),
+                policy_mode=PolicyMode.NORMAL,
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_type"], "action.executed")
+        self.assertFalse(event["payload"]["performed"])
+        self.assertIn("refusal_reason", event["payload"])
+        self.assertEqual(
+            event["payload"]["refusal_reason"],
+            "action_type_not_whitelisted",
+        )
+
+    def test_no_telemetry_args_does_not_emit(self) -> None:
+        """Without telemetry args, no action.executed event is emitted."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=lambda p: "ok",
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNone(event)
+
+    def test_source_is_execution(self) -> None:
+        """action.executed event has source='execution'."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=lambda p: "ok",
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["source"], "execution")
+
+    def test_missing_provenance_id_emits_refused(self) -> None:
+        """Missing provenance_id emits action.executed with performed=False."""
+        mock_logger = MagicMock()
+        proposal = _make_proposal(provenance_id="   ")
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=proposal,
+                policy_mode=PolicyMode.NORMAL,
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["performed"])
+        self.assertEqual(
+            event["payload"]["refusal_reason"],
+            "missing_provenance_id",
+        )
+
+    def test_llm_call_not_provided_emits_refused(self) -> None:
+        """llm_call=None emits action.executed with performed=False."""
+        mock_logger = MagicMock()
+        with patch("eck.execution.logger", mock_logger):
+            authorize_and_perform(
+                proposed_action=_make_proposal(),
+                policy_mode=PolicyMode.NORMAL,
+                llm_call=None,
+                **_TELEMETRY_ARGS,
+            )
+        event = _get_telemetry_event(mock_logger)
+        self.assertIsNotNone(event)
+        self.assertFalse(event["payload"]["performed"])
+        self.assertEqual(
+            event["payload"]["refusal_reason"],
+            "llm_call_not_provided",
+        )
 
 
 if __name__ == "__main__":
