@@ -32,6 +32,7 @@ Thin-slice implementation note (ADR-042 section 5a):
 
 ADR references:
   ADR-042: Propose/Authorize/Perform Execution Boundary
+  ADR-045: Formal Telemetry Schema and Observability Contract
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ import logging
 from typing import Callable
 
 from .config import PolicyMode
+from .telemetry import emit_event
 from .types import ExecutionResult, ProposedAction
 from .utils import generate_id
 
@@ -70,6 +72,10 @@ def propose_execution(
     task_text: str,
     llm_call: Callable[[str], str],
     task_id: str | None = None,
+    *,
+    trace_id: str | None = None,
+    step_id: str | None = None,
+    deterministic_nonce: int | None = None,
 ) -> ProposedAction | None:
     """
     Call the LLM and parse its response into a ProposedAction (ADR-042).
@@ -92,6 +98,9 @@ def propose_execution(
         task_text: The current task description (used as prompt context).
         llm_call:  LLM callable.
         task_id:   Optional task correlation ID. Generated if not provided.
+        trace_id:  Optional telemetry trace identifier.
+        step_id:   Optional telemetry step identifier.
+        deterministic_nonce: Optional telemetry step nonce.
 
     Returns:
         ProposedAction if parsing succeeds, None otherwise.
@@ -99,6 +108,41 @@ def propose_execution(
     tid = task_id or generate_id()
     provenance_id = generate_id()
     raw = ""
+
+    def _emit_action_proposed(
+        *,
+        proposal_present: bool,
+        action_type: str | None = None,
+        provenance_id_value: str | None = None,
+        parameter_keys: list[str] | None = None,
+        proposal_refusal_reason: str | None = None,
+    ) -> None:
+        if trace_id is None or step_id is None or deterministic_nonce is None:
+            return
+
+        payload: dict[str, object] = {
+            "proposal_present": proposal_present,
+        }
+        if proposal_present:
+            payload["action_type"] = action_type
+            payload["task_id"] = tid
+            payload["provenance_id"] = provenance_id_value
+            if parameter_keys is not None:
+                payload["parameter_keys"] = parameter_keys
+        else:
+            if proposal_refusal_reason is not None:
+                payload["proposal_refusal_reason"] = proposal_refusal_reason
+
+        emit_event(
+            "action.proposed",
+            trace_id=trace_id,
+            step_id=step_id,
+            deterministic_nonce=deterministic_nonce,
+            severity="INFO",
+            source="execution",
+            payload=payload,
+            logger=logger,
+        )
 
     prompt = (
         f"Given this task, propose an action to perform.\n\n"
@@ -121,9 +165,13 @@ def propose_execution(
                     "response_type": type(raw).__name__,
                 },
             )
+            _emit_action_proposed(
+                proposal_present=False,
+                proposal_refusal_reason="llm_non_string_response",
+            )
             return None
         data = json.loads(raw.strip())
-    except (json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
+    except json.JSONDecodeError as e:
         logger.warning(
             "propose_execution: LLM response unparseable",
             extra={
@@ -131,6 +179,24 @@ def propose_execution(
                 "error": str(e),
                 "response_preview": raw[:80] if isinstance(raw, str) else "",
             },
+        )
+        _emit_action_proposed(
+            proposal_present=False,
+            proposal_refusal_reason="json_parse_failure",
+        )
+        return None
+    except (ValueError, TypeError, KeyError) as e:
+        logger.warning(
+            "propose_execution: LLM response unparseable",
+            extra={
+                "task_id": tid,
+                "error": str(e),
+                "response_preview": raw[:80] if isinstance(raw, str) else "",
+            },
+        )
+        _emit_action_proposed(
+            proposal_present=False,
+            proposal_refusal_reason="parse_failure",
         )
         return None
 
@@ -144,6 +210,10 @@ def propose_execution(
                 "whitelist": sorted(_WHITELISTED_ACTIONS),
             },
         )
+        _emit_action_proposed(
+            proposal_present=False,
+            proposal_refusal_reason="action_type_not_whitelisted",
+        )
         return None
 
     parameters = data.get("parameters", {})
@@ -151,6 +221,10 @@ def propose_execution(
         logger.warning(
             "propose_execution: parameters is not a dict",
             extra={"task_id": tid, "action_type": action_type},
+        )
+        _emit_action_proposed(
+            proposal_present=False,
+            proposal_refusal_reason="parameters_not_dict",
         )
         return None
 
@@ -167,6 +241,10 @@ def propose_execution(
                 "missing": sorted(missing),
             },
         )
+        _emit_action_proposed(
+            proposal_present=False,
+            proposal_refusal_reason="missing_required_parameters",
+        )
         return None
 
     try:
@@ -182,6 +260,10 @@ def propose_execution(
             "propose_execution: ProposedAction construction failed",
             extra={"task_id": tid, "error": str(e)},
         )
+        _emit_action_proposed(
+            proposal_present=False,
+            proposal_refusal_reason="construction_failure",
+        )
         return None
 
     logger.info(
@@ -192,6 +274,12 @@ def propose_execution(
             "provenance_id": provenance_id,
         },
     )
+    _emit_action_proposed(
+        proposal_present=True,
+        action_type=action_type,
+        provenance_id_value=provenance_id,
+        parameter_keys=sorted(parameters.keys()),
+    )
     return proposal
 
 
@@ -201,6 +289,10 @@ def authorize_and_perform(
     proposed_action: ProposedAction,
     policy_mode: PolicyMode,
     llm_call: Callable[[str], str] | None = None,
+    *,
+    trace_id: str | None = None,
+    step_id: str | None = None,
+    deterministic_nonce: int | None = None,
 ) -> ExecutionResult:
     """
     Sole effects boundary for the ECK execution surface (ADR-042).
@@ -235,11 +327,40 @@ def authorize_and_perform(
         proposed_action: The ProposedAction to authorize and perform.
         policy_mode:     Current policy mode (defensive HALT check — INV6).
         llm_call:        LLM callable (required for llm_query actions).
+        trace_id:        Optional telemetry trace identifier.
+        step_id:         Optional telemetry step identifier.
+        deterministic_nonce: Optional telemetry step nonce.
 
     Returns:
         ExecutionResult with performed=True on success,
         performed=False with refusal_reason on any contract-level refusal.
     """
+    def _emit_action_executed(result: ExecutionResult) -> None:
+        if trace_id is None or step_id is None or deterministic_nonce is None:
+            return
+
+        payload: dict[str, object] = {
+            "performed": result.performed,
+            "action_type": proposed_action.action_type,
+            "task_id": proposed_action.task_id,
+            "provenance_id": proposed_action.provenance_id,
+        }
+        if result.performed:
+            payload["outcome"] = result.outcome
+        else:
+            payload["refusal_reason"] = result.refusal_reason
+
+        emit_event(
+            "action.executed",
+            trace_id=trace_id,
+            step_id=step_id,
+            deterministic_nonce=deterministic_nonce,
+            severity="INFO",
+            source="execution",
+            payload=payload,
+            logger=logger,
+        )
+
     # ── Invariant enforcement (non-compliant caller — raises, does not refuse) ─
     if proposed_action is None:
         raise AssertionError(
@@ -267,11 +388,13 @@ def authorize_and_perform(
                 "refusal_reason": "action_type_not_whitelisted",
             },
         )
-        return ExecutionResult(
+        result = ExecutionResult(
             performed=False,
             outcome="",
             refusal_reason="action_type_not_whitelisted",
         )
+        _emit_action_executed(result)
+        return result
 
     # ── Kernel authorization: required parameter keys check ───────────────────
     # Thin slice: key presence only, not full type/value schema validation
@@ -290,11 +413,13 @@ def authorize_and_perform(
                 "refusal_reason": refusal,
             },
         )
-        return ExecutionResult(
+        result = ExecutionResult(
             performed=False,
             outcome="",
             refusal_reason=refusal,
         )
+        _emit_action_executed(result)
+        return result
 
     # ── Kernel authorization: provenance check ────────────────────────────────
     if not proposed_action.provenance_id or not proposed_action.provenance_id.strip():
@@ -307,11 +432,13 @@ def authorize_and_perform(
                 "refusal_reason": "missing_provenance_id",
             },
         )
-        return ExecutionResult(
+        result = ExecutionResult(
             performed=False,
             outcome="",
             refusal_reason="missing_provenance_id",
         )
+        _emit_action_executed(result)
+        return result
 
     # ── Perform effect ────────────────────────────────────────────────────────
     try:
@@ -327,11 +454,13 @@ def authorize_and_perform(
                         "refusal_reason": "llm_call_not_provided",
                     },
                 )
-                return ExecutionResult(
+                result = ExecutionResult(
                     performed=False,
                     outcome="",
                     refusal_reason="llm_call_not_provided",
                 )
+                _emit_action_executed(result)
+                return result
             prompt = str(proposed_action.parameters["prompt"])
             raw_outcome = llm_call(prompt)
             if not isinstance(raw_outcome, str):
@@ -346,11 +475,13 @@ def authorize_and_perform(
                         "response_type": type(raw_outcome).__name__,
                     },
                 )
-                return ExecutionResult(
+                result = ExecutionResult(
                     performed=False,
                     outcome="",
                     refusal_reason="llm_query_non_string_response",
                 )
+                _emit_action_executed(result)
+                return result
             outcome = " ".join(raw_outcome.strip().split())
             logger.info(
                 "authorize_and_perform: llm_query performed",
@@ -362,11 +493,13 @@ def authorize_and_perform(
                     "outcome": outcome,
                 },
             )
-            return ExecutionResult(
+            result = ExecutionResult(
                 performed=True,
                 outcome=outcome,
                 refusal_reason=None,
             )
+            _emit_action_executed(result)
+            return result
 
     except Exception as e:  # pragma: no cover
         logger.warning(
@@ -378,15 +511,20 @@ def authorize_and_perform(
                 "error": str(e),
             },
         )
-        return ExecutionResult(
+        result = ExecutionResult(
             performed=False,
             outcome="",
             refusal_reason=f"unexpected_error:{e}",
         )
+        _emit_action_executed(result)
+        return result
 
     # Defensive: unreachable if whitelist and action handlers are in sync
-    return ExecutionResult(  # pragma: no cover
+    result = ExecutionResult(  # pragma: no cover
         performed=False,
         outcome="",
         refusal_reason=f"unhandled_action_type:{action_type}",
     )
+    _emit_action_executed(result)
+    return result
+
