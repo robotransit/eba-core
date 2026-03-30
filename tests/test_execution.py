@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from eck.config import PolicyMode
@@ -71,6 +72,20 @@ def _make_proposal(
         task_id=task_id,
         provenance_id=provenance_id,
     )
+
+
+def _make_proposal_ns(**kwargs) -> SimpleNamespace:
+    """Construct a SimpleNamespace proposal for testing edge cases that
+    cannot be expressed as a valid ProposedAction."""
+    defaults = dict(
+        action_type="llm_query",
+        parameters={"prompt": "do the thing"},
+        task_text="task",
+        task_id="tid-001",
+        provenance_id="prov-001",
+    )
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
 
 
 # ── Telemetry helpers ─────────────────────────────────────────────────────────
@@ -637,7 +652,7 @@ class TestAuthorizeAndPerformTelemetry(unittest.TestCase):
     def test_missing_provenance_id_emits_refused(self) -> None:
         """Missing provenance_id emits action.executed with performed=False."""
         mock_logger = MagicMock()
-        proposal = _make_proposal(provenance_id="   ")
+        proposal = _make_proposal_ns(provenance_id="   ")
         with patch("eck.execution.logger", mock_logger):
             authorize_and_perform(
                 proposed_action=proposal,
