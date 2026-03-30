@@ -203,6 +203,14 @@ class ECKAgent:
             halt_reason: str | None = None,
             severity: str = "INFO",
         ) -> bool:
+            # Advance the cycle counter on every post-step.start exit —
+            # continued and halted paths alike. A started step is a completed
+            # cycle regardless of which return path is taken. This ensures
+            # self.cycles accurately reflects the number of started steps,
+            # nonce progression is correct across runs, and run() iteration
+            # accounting is honest.
+            self.cycles += 1
+
             payload = {
                 "continued": continued,
                 "queue_length": len(self.queue),
@@ -502,14 +510,14 @@ class ECKAgent:
                 },
             )
 
-        self.cycles += 1
-
         # 7. Periodic guard — single severe halt seam (ADR-040)
         # Default guard_interval=1 delivers per-cycle semantics.
         # Increase guard_interval to introduce a grace period (explicit opt-in).
         # Snapshot is taken fresh here — independent of whether the drift
         # block ran this cycle (skipped for rejected/deferred categories).
-        if self.cycles % self.config.guard_interval == 0:
+        # self.cycles is incremented inside _end() — the guard anticipates
+        # the post-increment value via (self.cycles + 1).
+        if (self.cycles + 1) % self.config.guard_interval == 0:
             snap = self.drift.snapshot()
             if snap["severe"]:
                 logger.critical(
