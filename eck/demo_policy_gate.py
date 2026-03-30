@@ -42,6 +42,10 @@ class DemoPolicyGate:
         proposed_action: Any,
         confidence: float,
         context: PolicyContext,
+        *,
+        trace_id: str | None = None,
+        step_id: str | None = None,
+        deterministic_nonce: int | None = None,
     ) -> PolicyDecision:
         """
         Evaluate the proposed action under childcare-domain policy rules.
@@ -57,6 +61,9 @@ class DemoPolicyGate:
             proposed_action: Structured proposed action under evaluation.
             confidence: Current epistemic confidence in [0.0, 1.0].
             context: PolicyContext for the current cycle.
+            trace_id: Optional telemetry trace identifier.
+            step_id: Optional telemetry step identifier.
+            deterministic_nonce: Optional telemetry step nonce.
 
         Returns:
             PolicyDecision for the current cycle.
