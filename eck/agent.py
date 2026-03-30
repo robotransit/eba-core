@@ -264,6 +264,9 @@ class ECKAgent:
             task_text=task_text,
             llm_call=self.llm,
             task_id=task_id,
+            trace_id=self._trace_id,
+            step_id=step_id,
+            deterministic_nonce=step_nonce,
         )
 
         # Step 2b: Handle no proposal — per-cycle no-op, not a halt
@@ -289,6 +292,9 @@ class ECKAgent:
                 proposed_action=proposed,
                 confidence=self._confidence.get_value(),
                 context=policy_context,
+                trace_id=self._trace_id,
+                step_id=step_id,
+                deterministic_nonce=step_nonce,
             )
 
             # Step 2d: Kernel authorization and effect
@@ -298,6 +304,9 @@ class ECKAgent:
                     proposed_action=proposed,
                     policy_mode=self.current_policy_mode,
                     llm_call=self.llm,
+                    trace_id=self._trace_id,
+                    step_id=step_id,
+                    deterministic_nonce=step_nonce,
                 )
             else:
                 execution_result = ExecutionResult(
@@ -359,7 +368,13 @@ class ECKAgent:
         # rejected/deferred categories produce no confidence update per ADR-021
         # — this is handled inside confidence.py.
         prior_confidence = self._confidence.get_value()
-        new_confidence = self._confidence.update(critic_outcome, partial_structure)
+        new_confidence = self._confidence.update(
+            critic_outcome,
+            partial_structure,
+            trace_id=self._trace_id,
+            step_id=step_id,
+            deterministic_nonce=step_nonce,
+        )
         logger.info(
             "Confidence updated",
             extra={
