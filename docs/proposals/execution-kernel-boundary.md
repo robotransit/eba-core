@@ -1,9 +1,16 @@
 # Proposal: Execution Kernel Boundary (EKB)
 
-> **Status: Exploratory proposal only.**  
-> This document is not an adopted architectural decision.  
-> It defines a reserved future boundary and explicit trigger conditions for adoption.  
+> **Status: Exploratory proposal only.**
+> This document is not an adopted architectural decision.
+> It defines a reserved future boundary and explicit trigger conditions for adoption.
 > No implementation work is implied by its existence.
+
+---
+
+## Status
+
+Exploratory (Design Commitment Only — Pre-ADR)
+
 ---
 
 ## Purpose
@@ -46,13 +53,11 @@ This document explicitly does **not**:
 
 Execution is currently embedded within ECK:
 
-```text id="1x9r0k"
-ProposedAction
+```ProposedAction
 → PolicyDecision
 → authorize_and_perform(...)
 → ExecutionResult
 ```
-
 Where:
 
 * **authorization** (policy gate) is semantic
@@ -85,15 +90,15 @@ Therefore:
 
 If/when implemented, the architecture becomes:
 
-```text id="h3m1fz"
+```
 ECK (semantic authority)
-    ↓
+↓
 AuthorizedAction
-    ↓
+↓
 Execution Kernel (mechanical authority)
-    ↓
+↓
 KernelExecutionResult
-    ↓
+↓
 ECK (critic / confidence)
 ```
 
@@ -106,9 +111,8 @@ one of the following conditions is met:
 
 ### 1. Multiple Action Types
 
-* More than one `action_type` exists
+* More than one action_type exists
 * Action types have materially different execution characteristics
-  (e.g. LLM call vs API call vs file operation)
 
 **Signal:** execution mechanics are no longer uniform
 
@@ -130,7 +134,7 @@ one of the following conditions is met:
 
 * Multiple ECK instances must:
 
-  * share tools/resources
+  * share resources
   * coordinate execution
   * operate over a common runtime
 
@@ -150,7 +154,7 @@ Until at least one of the above conditions is met:
 
 At v0.3.0:
 
-* Only one action type exists (`llm_query`)
+* Only one action type exists (llm_query)
 * Execution is stateless and immediate
 * No replay, checkpointing, or orchestration is required
 * No shared execution surface exists
@@ -171,61 +175,69 @@ EKB is correctly defined but not yet justified for implementation.
 The following structures represent the intended shape of the boundary
 **if/when implemented**. These are not introduced into the codebase at this stage.
 
----
-
 ### AuthorizedAction
 
-Immutable handoff from ECK to execution layer.
-
-```python id="6c2zlf"
-@dataclass(frozen=True)
-class AuthorizedAction:
-    action_type: str
-    parameters: Mapping[str, Any]
-
-    task_id: str
-    provenance_id: str
-
-    policy_rule_id: str
-    policy_mode: str
-    confidence: float
-
-    trace_id: str | None = None
-    step_id: str | None = None
-    deterministic_nonce: int | None = None
-```
+* Immutable semantic authorization output
+* Contains policy + provenance + trace context
+* Represents the final decision of ECK prior to execution
 
 ---
 
 ### KernelExecutionResult
 
-Mechanical outcome returned from execution layer.
-
-```python id="pg3v4n"
-@dataclass(frozen=True)
-class KernelExecutionResult:
-    performed: bool
-    outcome: str
-
-    refusal_reason: str | None = None
-
-    execution_id: str | None = None
-    journal_id: str | None = None
-    checkpoint_id: str | None = None
-
-    executor_status: str | None = None
-    metadata: Mapping[str, Any] | None = None
-```
+* Purely mechanical outcome of execution
+* Contains what happened, not what it means
+* No epistemic interpretation
 
 ---
 
 ### ExecutionKernel Protocol
 
-```python id="r0nm4c"
-class ExecutionKernel(Protocol):
-    def execute(self, authorized_action: AuthorizedAction) -> KernelExecutionResult:
-        ...
-```
+* Single method: execute(AuthorizedAction) → KernelExecutionResult
+* No policy logic
+* No confidence interaction
+
+---
+
+## Critical Constraints (Boundary Safety)
+
+### 1. Epistemic Isolation of Failure Semantics
+
+The Execution Kernel MUST NOT:
+
+* reinterpret execution outcomes
+* classify success/failure semantically
+* transform outcomes beyond mechanical normalization
+
+All epistemic classification remains strictly within:
+
+> critic → confidence → policy
+
+**Rationale:**
+Allowing execution to interpret outcomes introduces hidden epistemic coupling,
+violating ECK’s authority separation.
+
+---
+
+### 2. Determinism Preservation
+
+The Execution Kernel MUST NOT:
+
+* introduce unbounded non-determinism
+* alter retry semantics without explicit mediation
+* introduce timing-dependent behavioral divergence
+
+Any non-determinism must be:
+
+* externally bounded
+* explicitly mediated
+* observable via telemetry
+
+**Invariant:**
+
+> Identical inputs must produce identical control behavior
+
+Execution variability must not break this invariant.
 
 ---
 
@@ -233,7 +245,7 @@ class ExecutionKernel(Protocol):
 
 ### Current flow
 
-```text id="z8r6wb"
+```
 ProposedAction
 → PolicyDecision
 → authorize_and_perform(...)
@@ -244,16 +256,16 @@ ProposedAction
 
 ### Future flow (conditional)
 
-```text id="9ld4xs"
+```
 ProposedAction
 → PolicyDecision
 
 IF EXECUTE:
-    → AuthorizedAction
-    → ExecutionKernel.execute(...)
-    → KernelExecutionResult
+→ AuthorizedAction
+→ ExecutionKernel.execute(...)
+→ KernelExecutionResult
 ELSE:
-    → synthetic ExecutionResult
+→ synthetic ExecutionResult
 
 → critic_evaluate(...)
 → confidence.update(...)
@@ -263,48 +275,47 @@ ELSE:
 
 ## Minimal Implementation Path (Conditional)
 
-If a trigger condition is met, the boundary should be introduced via:
+If a trigger condition is met:
 
-1. Extract execution logic from `authorize_and_perform`
-2. Introduce `ExecutionKernel.execute(...)`
-3. Wrap existing behavior in a default execution kernel
-4. Maintain identical external behavior (no semantic change)
+1. Extract execution logic from authorize_and_perform
+2. Introduce ExecutionKernel interface
+3. Wrap existing behavior in default implementation
+4. Preserve identical external behavior
 
 ---
 
 ## Design Principles
 
-### 1. Authority Separation
+### Authority Separation
 
-* ECK: decides **what may happen**
-* Execution Kernel: decides **how it happens**
+* ECK: decides what may happen
+* Execution Kernel: performs how it happens
 
 ---
 
-### 2. One-Way Authority Gradient
+### One-Way Authority Gradient
 
-* ECK → execution (information flow)
+* ECK → execution (information)
 * execution → ECK (results only)
-* execution cannot modify policy or confidence
 
 ---
 
-### 3. No Hidden Coupling
+### No Hidden Coupling
 
-Execution layer must not:
+Execution must not:
 
-* reinterpret confidence
-* alter policy decisions
+* influence policy
+* influence confidence
 * inject control signals
 
 ---
 
-### 4. Semantic vs Mechanical Failure
+### Semantic vs Mechanical Failure
 
-| Type       | Owner            | Example               |
-| ---------- | ---------------- | --------------------- |
-| Semantic   | ECK              | policy rejection      |
-| Mechanical | Execution Kernel | tool failure, timeout |
+| Type       | Owner            |
+| ---------- | ---------------- |
+| Semantic   | ECK              |
+| Mechanical | Execution Kernel |
 
 ---
 
@@ -313,19 +324,16 @@ Execution layer must not:
 * replay / journaling
 * resumable execution
 * multi-agent coordination
-* execution policy layers (rate limits, budgets)
+* execution-level policy (rate limits, budgets)
 
 ---
 
 ## What This Does NOT Do
 
-This proposal does not:
-
-* modify confidence semantics
-* modify policy gate logic
+* change confidence semantics
+* change policy gate behavior
 * introduce new authority layers
 * require infrastructure changes
-* mandate execution complexity
 
 ---
 
@@ -333,19 +341,15 @@ This proposal does not:
 
 Do not implement at this stage.
 
-Instead:
-
-* treat this as a **reserved boundary definition**
-* use it to guide future design decisions
-* revisit only when a trigger condition is observed
+* treat as a reserved boundary
+* revisit only when trigger conditions are met
 
 ---
 
 ## Bottom Line
 
 > The Execution Kernel Boundary is not a feature.
-> It is a **predefined place for future complexity to land safely**.
+> It is a predefined place for future complexity to land safely.
 
-You do not need it yet.
-
-But if you need it later, it must already be defined.
+It is not needed yet.
+But when it is, it must already be correct.
