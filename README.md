@@ -10,14 +10,16 @@ If something is not visible in code or tests, it does not exist.
 
 ## Current Status
 
-**v0.2.0** — Architecture locked and CI-enforced  
-(ADR-020–ADR-037)
+**v0.3.0** — Integrated control loop + telemetry wiring
+(ADR-021–ADR-045)
 
-- Deterministic core + optional capability layers  
-- All invariants, guardrails, and policy boundaries are now formally documented and test-locked  
-- GitHub Actions CI (core + capability layers) with full coverage enforcement  
+* Deterministic control loop (confidence → policy → execution → critic) fully integrated
+* Policy gate enforced as exclusive execution authority across the live agent loop
+* End-to-end telemetry (ADR-045) with coherent per-step traces and deterministic nonce progression
+* CI-enforced invariants extended to full control-cycle behavior
 
-The v0.2.0 line is behaviourally stable, test-complete, and invariant-locked. No feature work is permitted without a version escalation.
+The v0.3.0 line is operational, trace-complete, and invariant-enforced at runtime. No feature work is permitted without a version escalation.
+
 
 ---
 
