@@ -5,82 +5,281 @@
 The Epistemic Control Kernel (ECK) follows a **microkernel-style architecture** that strictly separates a small deterministic core from optional capability layers.
 
 The design prioritizes:
-- Strict control over authority surfaces
-- Deterministic and testable core behavior
-- Explicit policy gate for all behavioral effects
+
+* Strict control over authority surfaces
+* Deterministic and testable core behavior
+* Explicit policy mediation for all behavioral effects
 
 Core agent behavior must remain stable and predictable **regardless of optional capability layers**. Capability features (memory retrieval, similarity scoring, prompt scaffolding, etc.) must remain **advisory-only** and never alter core semantics unless explicitly mediated by the policy gate.
 
 All significant architectural decisions are recorded in the [Architecture Decision Records (ADRs)](./docs/adr/).
 
+---
+
 ## System Model
 
-At runtime, the ECK executes a deterministic agent loop in which:
+At runtime, the ECK executes a deterministic agent loop with explicit separation between:
 
-1. Tasks or actions are proposed or generated.
-2. A critic evaluates outcomes and returns a typed `CriticOutcome` plus optional `PartialStructure`.
-3. Epistemic signals (confidence) are updated according to explicit rules — including partial outcomes via kernel-normalised `PartialStructure`.
-4. The policy gate evaluates proposed actions against epistemic state and returns an execution mode.
-5. The agent loop enforces that decision before any execution occurs.
-6. Drift is tracked append-only; the periodic guard checks for severe instability and halts if detected.
-7. The goal completion predicate is evaluated deterministically — success, natural queue exhaustion, and confidence threshold must all be satisfied simultaneously.
+* proposal
+* epistemic evaluation
+* policy decision
+* execution authorization
+* execution
+* telemetry emission
 
-This establishes a strict separation between decision (policy gate) and enforcement (agent loop).
+The full cycle is:
 
-The kernel operates as a compact, policy-mediated state machine whose state transitions are driven exclusively by deterministic rules and critic-derived signals, never directly by LLM reasoning or capability-layer outputs.
+1. A task or action is proposed (`ProposedAction`)
+2. The policy gate evaluates the proposal against epistemic state and returns a `PolicyDecision`
+3. The agent loop enforces the decision prior to execution
+4. If authorized, execution occurs via `authorize_and_perform(...)`
+5. An `ExecutionResult` is produced
+6. The critic evaluates the result and returns `CriticOutcome` + optional `PartialStructure`
+7. Confidence is updated deterministically
+8. Drift is recorded append-only and checked via periodic guard
+9. Goal completion is evaluated deterministically
+10. Telemetry is emitted as a coherent per-step trace
 
-All behavioral influence flows through explicit policy gate mediation. External signals such as memory retrieval, similarity scores, or prompt scaffolding may provide contextual information but cannot directly alter execution.
+This establishes a strict separation between:
 
-This model ensures that cognition-like capabilities remain advisory while the kernel retains full authority over behavior.
+* **decision (policy gate)**
+* **authorization (agent loop)**
+* **execution (mechanical effect)**
+* **epistemic evaluation (critic)**
+* **observability (telemetry surface)**
+
+The kernel operates as a compact, policy-mediated state machine whose transitions are driven exclusively by deterministic rules and critic-derived signals, never by LLM outputs directly.
+
+---
+
+## Execution Boundary (ADR-042)
+
+The execution boundary formalises the transition from policy decision to effect.
+
+Key components:
+
+* `ProposedAction` — structured, pre-execution action representation
+* `authorize_and_perform(...)` — single execution seam
+* `ExecutionResult` — canonical post-execution result
+
+Execution sequence:
+
+BACKTICKS
+propose → evaluate (policy gate) → authorize → perform → result
+BACKTICKS
+
+### Invariants
+
+* Execution occurs **only** after explicit policy authorization
+* Unauthorized actions must never execute
+* `authorize_and_perform` is the sole effectful boundary
+* Execution results must be fully captured in `ExecutionResult`
+* No implicit execution paths exist outside the boundary
+* Execution must be deterministic with respect to inputs
+
+This boundary defines the kernel's **effect authority surface**.
+
+---
+
+## Policy Gate
+
+The policy gate is the exclusive consumer of confidence for control decisions and the sole pre-execution mediation layer between epistemic state and execution.
+
+The `PolicyGate` contract is expressed as a structural `typing.Protocol` with `@runtime_checkable`. Any class implementing `evaluate(proposed_action, confidence, context) -> PolicyDecision` with the correct signature satisfies the contract without requiring nominal inheritance.
+
+The default implementation is `DefaultPolicyGate` — a conservative, domain-agnostic baseline that maps confidence bands to execution modes. Domain-specific policy modules may be injected at construction time.
+
+### Domain-Specific Policy Modules (ADR-043 / ADR-044)
+
+ADR-043 formalises the proof that policy is not reducible to confidence, demonstrated via the childcare domain `DemoPolicyGate`. Six load-bearing rules are evaluated in a fixed order: out-of-domain fallback, schema validation, high-safety unbounded refusal, child-facing transformation refusal, failure window, and baseline confidence thresholds.
+
+ADR-044 defines out-of-domain evaluation semantics. Domain-specific policy modules that rely on `PolicyContext.environment` must not raise, must not silently passthrough, and must return an explicit non-EXECUTE `PolicyDecision` with a stable `rule_id` and `reason` identifying the domain mismatch. The kernel does not enforce policy-module/domain matching — that responsibility belongs to the operator.
+
+See:
+
+→ [docs/adr/ADR-038.md](docs/adr/ADR-038.md)
+→ [docs/adr/ADR-039.md](docs/adr/ADR-039.md)
+→ [docs/adr/ADR-043.md](docs/adr/ADR-043.md)
+→ [docs/adr/ADR-044.md](docs/adr/ADR-044.md)
+
+---
+
+## Telemetry Surface (ADR-045)
+
+The telemetry system provides structured, deterministic observability of the full agent cycle.
+
+Location:
+
+* `eck/telemetry.py`
+* `telemetry/telemetry.schema.json`
+* `telemetry/event_catalog.md`
+
+Characteristics:
+
+* Fully deterministic
+* Side-effect free with respect to control flow
+* Replay-safe — no behavioral impact when enabled or disabled
+* Stdlib-only implementation
+
+### Event Model
+
+The system emits exactly six canonical event types representing the full cycle:
+
+| Event | Source | Meaning |
+|---|---|---|
+| `step.start` | `agent` | cycle boundary opens |
+| `action.proposed` | `execution` | proposal outcome |
+| `policy.evaluate` | `policy_gate` | gate decision |
+| `action.executed` | `execution` | execution outcome |
+| `epistemic.signal` | `confidence` | confidence state transition |
+| `step.end` | `agent` | cycle boundary closes |
+
+### Trace Coherence
+
+Each step is associated with three shared identifiers:
+
+* `trace_id` — run-level correlation identifier, refreshed at `run()` start
+* `step_id` — derived deterministically from `trace_id` and `deterministic_nonce` via `make_step_id()`
+* `deterministic_nonce` — monotonic integer derived from `self.cycles` at step entry
+
+All six events within a step share identical values for all three identifiers, enabling complete per-step trace reconstruction and deterministic replay.
+
+### Replay Silence
+
+`ConfidenceSignal.replay()` produces no `epistemic.signal` events. Telemetry is suppressed during replay for the same reason logging is suppressed — replay is an internal audit mechanism, not a live control cycle.
+
+### Constraint
+
+> Telemetry must never influence behavior.
+
+---
 
 ## Core Architectural Principles
 
-- **Deterministic Core**  
-  The agent loop, policy modes, and execution seam must remain deterministic and stdlib-only. Core behavior must not depend on external services or optional dependencies.
+* **Deterministic Core**
+  The agent loop, execution boundary, and policy gate must remain deterministic and stdlib-only.
 
-- **Advisory Memory & Cognition**  
-  Memory retrieval, critic feedback, similarity scoring, and prompts provide contextual information only. They must never become authority surfaces or directly control behavior.
+* **Explicit Authority Surfaces**
+  All authority transitions are explicit:
 
-- **Explicit Policy Gate**  
-  All signals must be mediated by explicit policy gate logic before affecting execution, mode transitions, or gating, with confidence acting as the primary control signal consumed exclusively by the policy gate. All resulting control decisions must be enforced by the agent loop before execution.
+  * proposal → policy → authorization → execution
 
-- **Optional Capability Layers**  
-  Advanced features must remain optional (via toggles or extras) and must not introduce mandatory dependencies, runtime coupling, or non-determinism into the core.
+* **Policy Gate Exclusivity**
+  The policy gate is the sole consumer of epistemic signals and the only authority for execution decisions.
 
-- **Monotonic Safety**  
-  Policy mode upgrades are irreversible. Drift evidence is append-only. Severe instability halts via a single configurable enforcement seam — no internal recovery, no silent reset.
+* **Advisory Cognition**
+  Memory, prompts, similarity, and LLM outputs are advisory-only.
 
-- **Epistemic Seriousness**  
-  The confidence signal is updated on every cycle including partial outcomes. The critic never controls confidence dynamics directly — category derivation and PartialStructure normalisation are kernel authority. The LLM proposes bounded evidence; the kernel classifies and owns consequences.
+* **Optional Capability Layers**
+  All advanced features must be optional and removable without behavioral divergence.
+
+* **Monotonic Safety**
+  Policy mode upgrades are irreversible. Severe instability halts execution.
+
+* **Epistemic Seriousness**
+  Confidence is kernel-owned and updated deterministically from critic outcomes.
+
+---
 
 ## Safety Boundaries ("Must Never Happen")
 
-- No new authority surfaces through memory, prompts, similarity, or other capability layers
-- No silent coupling: signals must not alter behavior without explicit policy gate mediation
-- No dependency creep: the core package must remain stdlib-only
-- No prompt drift when retrieval is disabled (bit-for-bit prompt identity)
-- No split-brain state: new state variables must have a single source of truth and deterministic tests
-- No LLM authority over lifecycle decisions (goal completion, halt, policy mode)
-- No internal recovery from severe instability — halt is the only response
+* No execution without policy authorization
+* No authority surfaces outside the policy gate
+* No LLM control over execution, policy, or lifecycle
+* No non-deterministic behavior in core control flow
+* No behavioral side-effects from telemetry
+* No implicit execution paths outside `authorize_and_perform`
+* No silent coupling between signals and behavior
+* No new authority surfaces through memory, prompts, similarity, or capability layers
+* No dependency creep — the core package must remain stdlib-only
+* No split-brain state — new state variables must have a single source of truth
+
+---
 
 ## Core vs Optional Capabilities
 
 **Core** (always valid, even if all optionals are disabled):
-- Agent loop semantics
-- Policy mode behavior
-- Deterministic execution
-- Stdlib-only operation
-- Policy Gate contract and default control mediation
-- Agent loop enforcement of policy gate decisions
-- Confidence signal processor (EWMA, failure window, partial outcomes)
-- Critic outcome taxonomy and PartialStructure derivation
-- Drift monitoring and periodic guard
-- Goal completion predicate
+
+* Agent loop semantics and policy mode behavior
+* Policy gate contract and default control mediation
+* Execution boundary (`authorize_and_perform`)
+* `ProposedAction` / `ExecutionResult` model
+* Confidence signal processor (EWMA, failure window, partial outcomes)
+* Critic outcome taxonomy and `PartialStructure` derivation
+* Drift monitoring and periodic guard
+* Goal completion predicate
+* Telemetry surface (deterministic, stdlib-only)
 
 **Optional** (behind explicit toggles or extras):
-- Embedding-based similarity
-- Advanced memory scoring (future)
-- Additional evaluation or prioritization prompts
+
+* Memory retrieval
+* Embedding similarity
+* Prompt scaffolding
+* Advanced evaluation layers
+
+---
+
+## Reserved Architectural Boundaries (Design-Level Only)
+
+Two boundaries are defined as design commitments but are not yet implemented. Both follow the same pattern: design the boundary, name the types, do not implement until load exists.
+
+See `docs/proposals/` for full specifications.
+
+---
+
+### Execution Kernel Boundary (EKB)
+
+Separates semantic authority (what is allowed) from mechanical authority (how it is done).
+
+Reserved form:
+
+BACKTICKS
+ECK (semantic authority)
+    ↓
+AuthorizedAction
+    ↓
+Execution Kernel (mechanical authority)
+    ↓
+KernelExecutionResult
+    ↓
+ECK (critic / confidence)
+BACKTICKS
+
+Current state: execution is embedded within `authorize_and_perform`. The EKB introduces no behavior at present.
+
+Adoption triggers: multiple action types with materially different execution characteristics; resumability or replay requirements; shared execution surface across multiple ECK instances.
+
+→ [docs/proposals/Proposal_-_Execution_Kernel_Boundary.md](docs/proposals/Proposal_-_Execution_Kernel_Boundary.md)
+
+---
+
+### Compiled Policy Seam
+
+Defines the future ingestion path for document-derived policy.
+
+Reserved form:
+
+BACKTICKS
+Policy Documents
+    ↓
+External Compiler (LLM-assisted, offline, fallible)
+    ↓
+CompiledPolicy (immutable artifact)
+    ↓
+Human Review / Approval (mandatory)
+    ↓
+ECK (deterministic enforcement via CompiledPolicyGate)
+BACKTICKS
+
+Reserved components: `CompiledPolicy` (placeholder type), `CompiledPolicyGate` (no-op wrapper around `DefaultPolicyGate`).
+
+Current state: no compiled policy present. `DefaultPolicyGate` is sole authority.
+
+Adoption triggers: document-based policy required in practice; hand-authored rules become insufficient; policy provenance required.
+
+→ [docs/proposals/Proposal_-_External_Policy_Compiler_and_CompiledPolicyGate_Seam.md](docs/proposals/Proposal_-_External_Policy_Compiler_and_CompiledPolicyGate_Seam.md)
+
+---
 
 ## v0.2.0 Architecture Sequence
 
@@ -107,34 +306,13 @@ See the formal specification for full invariants and system model:
 
 **Policy Gate**
 - [ADR-038 — Policy Gate Contract – Exclusive Consumer of Epistemic Signals](docs/adr/ADR-038.md)
-- [ADR-043 — Demonstration Policy Module (Semantic Policy Capability)](docs/adr/ADR-043.md)
-- [ADR-044 — Out-of-Domain Policy Module Evaluation Semantics](docs/adr/ADR-044.md)
+- [ADR-039 — Agent Loop & Policy Gate Integration](docs/adr/ADR-039.md)
 
 #### Policy Gate (PR2 Implementation)
 
-The policy gate is the exclusive consumer of confidence for control decisions
-and the sole pre-execution mediation layer between epistemic state and
-execution. It enforces strict invariants including purity, determinism,
-side-effect freedom, monotonicity, and explicit default semantics. The policy
-gate is a pure, referentially transparent function of
-(proposed_action, confidence, context).
+The policy gate is the exclusive consumer of confidence for control decisions and the sole pre-execution mediation layer between epistemic state and execution. It enforces strict invariants including purity, determinism, side-effect freedom, monotonicity, and explicit default semantics. The policy gate is a pure, referentially transparent function of `(proposed_action, confidence, context)`.
 
-The `PolicyGate` contract is expressed as a structural `typing.Protocol`.
-Any class implementing `evaluate(proposed_action, confidence, context) ->
-PolicyDecision` with the correct signature satisfies the contract without
-requiring nominal inheritance.
-
-Domain-specific policy modules that rely on `PolicyContext.environment` or
-equivalent contextual assumptions must follow the out-of-domain evaluation
-semantics defined in ADR-044: out-of-domain evaluation must not raise, must
-not silently passthrough, and must return an explicit non-EXECUTE
-`PolicyDecision` with a stable `rule_id` and `reason` identifying the
-domain mismatch. The kernel does not enforce policy-module/domain matching —
-that responsibility belongs to the operator.
-
-See the ADR for full contract details and invariants:
-
-→ [docs/adr/ADR-038.md](docs/adr/ADR-038.md)
+ADR-039 establishes the agent loop as the enforcement point for the policy gate. No execution may occur without explicit gate authorization. No bypass paths are permitted.
 
 **Memory Integration**
 - [ADR-026 — Retrieval Semantics & Contract](docs/adr/ADR-026.md)
@@ -164,20 +342,63 @@ See the ADR for full contract details and invariants:
 
 The v0.2.0 kernel reconciliation completes the epistemic control loop end-to-end.
 
-**Drift monitoring (ADR-040):**  
+**Drift monitoring (ADR-040):**
 Drift evidence is append-only — no resets of history. Derived state (streak) may be cleared. Two independent halt conditions: streak-based halt and severe instability halt. Severe instability is enforced via a single periodic guard seam (`guard_interval=1` default delivers per-cycle semantics; increase for explicit grace period). No internal recovery — halt is the only response to severe instability.
 
-**Goal completion predicate (ADR-041):**  
+**Goal completion predicate (ADR-041):**
 Goal completion is a deterministic kernel predicate requiring all three conditions simultaneously: critic success, natural queue exhaustion (not policy-suppressed), and confidence ≥ threshold. The `subtasks_suppressed` flag disambiguates queue empty due to policy suppression from genuine completion. The LLM has no authority over this decision.
 
-**PartialStructure derivation:**  
+**PartialStructure derivation:**
 The critic derives authoritative `PartialStructure` from bounded LLM fields (`conflict_kind`, `conflict_footprint`). The kernel normalises to closed enum vocabulary with deterministic fallbacks (`RESOLUTION_INSTABILITY` + `{LOCAL}`). `PartialStructure` exists if and only if `category == "partial"`. Partial confidence updates are now fully active.
 
-**Critic disagreement semantics:**  
+**Critic disagreement semantics:**
 Disagreement is detected at the derived-category level, not raw outcome token level. Disagreement escalates severity to 1.0 but preserves the category from the first call. A would-be partial outcome stays partial even under disagreement.
+
+---
+
+## v0.3.0 Architecture Sequence
+
+The v0.3.0 architecture is defined through ADR-042 through ADR-045.
+
+**Execution Boundary**
+- [ADR-042 — Propose/Authorize/Perform Execution Boundary](docs/adr/ADR-042.md)
+
+**Domain Policy**
+- [ADR-043 — Demonstration Policy Module (Semantic Policy Capability)](docs/adr/ADR-043.md)
+- [ADR-044 — Out-of-Domain Policy Module Evaluation Semantics](docs/adr/ADR-044.md)
+
+**Telemetry**
+- [ADR-045 — Formal Telemetry Schema and Observability Contract](docs/adr/ADR-045.md)
+
+### Notable Additions
+
+* Explicit execution seam (`authorize_and_perform`) with six formal invariants
+* `ProposedAction` and `ExecutionResult` as first-class typed boundary objects
+* `PolicyGate` converted from abstract base class to structural `typing.Protocol`
+* Childcare domain policy proof (`DemoPolicyGate`) demonstrating policy is not reducible to confidence
+* Formal out-of-domain handling — no silent passthrough, explicit non-EXECUTE required
+* Deterministic telemetry surface with full per-step trace coherence
+* Six canonical telemetry event types instrumented at source ownership boundaries
+* `tests/test_telemetry_wiring.py` — trace-coherence integration tests driving live instrumented components
+
+### Cycle Accounting
+
+`self.cycles` is incremented inside `_end()` on all post-`step.start` exits — continued, goal completion, drift halt, and severe instability halt alike. This ensures:
+
+* consistent cycle accounting regardless of return path
+* accurate `deterministic_nonce` progression across steps
+* honest `run()` iteration accounting
+
+Pre-start exits (HALT mode, empty queue) do not call `_end()` and do not increment `self.cycles`.
+
+---
 
 ## Relationship to ADRs
 
-This ARCHITECTURE.md file provides a high-level map of the system. Detailed design reasoning, invariants, red lines, and test requirements are documented in the individual Architecture Decision Records under [docs/adr/](docs/adr/).
+This document provides a structural map of the system. All invariants, constraints, and design reasoning are defined in the individual Architecture Decision Records under [docs/adr/](docs/adr/).
 
-Readers seeking implementation rationale or detailed constraints should consult the relevant ADR.
+Reserved boundaries that are not yet implemented are documented in [docs/proposals/](docs/proposals/).
+
+Informal design notes that do not form part of the formal ADR sequence are preserved in [docs/design-notes/](docs/design-notes/).
+
+Readers seeking implementation rationale or detailed constraints should consult the relevant ADR or proposal document.
