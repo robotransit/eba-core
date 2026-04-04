@@ -1,0 +1,83 @@
+# ADR-046: Mechanical Enforcement Layer for v0.4.0
+
+## Status
+Proposed
+
+## Context
+With v0.3.0 complete and the core invariants from ADR-020–ADR-045 now locked in code, we need systematic mechanical enforcement to prevent regression and make invariant violations loud and visible.
+
+The mechanical enforcement layer consists of three tools:
+- mypy (static type checking)
+- CodeQL (static analysis and security scanning)
+- icontract (runtime contract enforcement)
+
+This ADR defines exactly which rules and targets each tool will enforce.
+
+## Decision
+
+### 1. mypy Configuration
+We will **not** enable the full `--strict` bundle.
+
+**Adopted flags:**
+- `--disallow-untyped-defs`
+- `--disallow-any-generics`
+- `--warn-return-any`
+- `--strict-equality`
+- `--no-implicit-reexport`
+- `--warn-unused-ignores`
+- `--no-implicit-optional`
+
+**Explicitly excluded:**
+- `--disallow-any-explicit` — ECK deliberately uses `Any` in controlled places (e.g. `proposed_action: Any` in PolicyGate and some telemetry payloads)
+- `--disallow-subclassing-any` — adds unnecessary friction with optional third-party dependencies
+- Full `--strict` bundle — replaced by the explicit curated list above
+
+All adopted mypy flags will start as warnings in CI and become blocking once the codebase is clean.
+
+### 2. CodeQL Configuration
+- `python/security-extended` — enabled and blocking in CI from day one
+- `python/quality` — enabled but non-blocking initially (warnings only)
+
+### 3. Enforcement Matrix
+
+| Surface                                      | Static Enforcement                                                                 | Runtime Enforcement              |
+|----------------------------------------------|------------------------------------------------------------------------------------|----------------------------------|
+| PolicyGate contract                          | mypy under the ADR-046 curated profile (evaluate() callable surface, static structural Protocol conformance via typing.Protocol, optional telemetry kwargs: trace_id, step_id, deterministic_nonce) | None                             |
+| ProposedAction schema surface                | mypy under the ADR-046 curated profile                                             | icontract                        |
+| authorize_and_perform authority boundary (INV3, INV6) | None                                                                               | icontract                        |
+| Confidence update invariants                 | None                                                                               | icontract                        |
+| Telemetry envelope validity                  | mypy under the ADR-046 curated profile                                             | Existing validate_event()        |
+
+### 4. icontract Targets
+icontract will be applied only where static analysis is insufficient:
+
+- `authorize_and_perform` authority boundary (INV3 and INV6)
+- Confidence update invariants (severity bounds, category validity, partial/non-partial structure pairing per ADR-021–025)
+- ProposedAction schema surface (value-level invariants intrinsic to the type: non-empty identifiers, admissible action_type surface, required structural fields)
+
+## Rationale
+- This matrix gives strong, non-redundant defense-in-depth.
+- PolicyGate contract is enforced statically via mypy under the ADR-046 curated profile.
+- Telemetry envelope validity is covered by mypy for types and the existing `validate_event()` for semantic runtime checks — no additional icontract is needed.
+- Runtime contracts focus on the most critical authority and value-level invariants that cannot be fully protected by types alone.
+- Security-extended CodeQL is prioritized because the kernel sits at a sensitive execution boundary.
+
+## Consequences
+**Positive:**
+- Earlier and louder detection of invariant violations
+- Clear separation between static guarantees and runtime behavioral contracts
+- No duplication of existing validation (`validate_event()`)
+
+**Negative:**
+- Initial CI noise during transition
+- Slight runtime overhead from icontract on hot paths
+
+**Mitigation:**
+- All mypy flags start as warnings and become blocking once the codebase is clean.
+- CodeQL quality checks remain non-blocking initially.
+- icontract is introduced incrementally on selected runtime surfaces; once a contract is present, violations fail tests.
+
+## References
+- ADR-020–ADR-045 (locked invariants)
+- v0.3.0 implementation checklist
+- TODO.md (v0.4.0 scope)
