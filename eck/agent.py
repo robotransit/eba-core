@@ -113,7 +113,7 @@ class ECKAgent:
                 self._embedding_model = None
         # ─────────────────────────────────────────────────────────────────────────────
 
-    def seed(self, initial_task: str = None) -> None:
+    def seed(self, initial_task: str | None = None) -> None:
         """Seed the agent with an initial task (or generate one)."""
         if initial_task is None:
             prompt = format_prompt(
