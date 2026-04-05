@@ -41,6 +41,8 @@ import json
 import logging
 from typing import Callable
 
+import icontract
+
 from .config import PolicyMode
 from .telemetry import emit_event
 from .types import ExecutionResult, ProposedAction
@@ -59,7 +61,7 @@ logger = logging.getLogger("eck-core")
 
 _WHITELISTED_ACTIONS: frozenset[str] = frozenset({"llm_query"})
 
-# Required parameter keys per action type (thin-slice schema — key presence only).
+# Required parameter keys per action type (thin slice — key presence only).
 # Full type/value schema validation is deferred (ADR-042 section 5a).
 _REQUIRED_PARAMS: dict[str, frozenset[str]] = {
     "llm_query": frozenset({"prompt"}),
@@ -233,6 +235,7 @@ def propose_execution(
     required = _REQUIRED_PARAMS.get(action_type, frozenset())
     missing = required - set(parameters.keys())
     if missing:
+        refusal = f"missing_required_parameters:{','.join(sorted(missing))}"
         logger.warning(
             "propose_execution: missing required parameters",
             extra={
@@ -243,7 +246,7 @@ def propose_execution(
         )
         _emit_action_proposed(
             proposal_present=False,
-            proposal_refusal_reason="missing_required_parameters",
+            proposal_refusal_reason=refusal,
         )
         return None
 
@@ -285,6 +288,30 @@ def propose_execution(
 
 # ── authorize_and_perform ─────────────────────────────────────────────────────
 
+@icontract.require(
+    lambda proposed_action: proposed_action is not None,
+    "proposed_action must not be None (INV3)"
+)
+@icontract.require(
+    lambda policy_mode: policy_mode != PolicyMode.HALT,
+    "must not be called in HALT mode (INV6)"
+)
+@icontract.require(
+    lambda proposed_action: proposed_action.action_type in _WHITELISTED_ACTIONS,
+    "action_type must be in the registered whitelist"
+)
+@icontract.require(
+    lambda proposed_action: bool(proposed_action.provenance_id.strip()),
+    "provenance_id must be non-empty"
+)
+@icontract.ensure(
+    lambda result: not result.performed or result.refusal_reason is None,
+    "performed=True implies refusal_reason is None"
+)
+@icontract.ensure(
+    lambda result: result.performed or result.outcome == "",
+    "performed=False implies outcome is empty string"
+)
 def authorize_and_perform(
     proposed_action: ProposedAction,
     policy_mode: PolicyMode,
@@ -408,9 +435,7 @@ def authorize_and_perform(
             extra={
                 "task_id": task_id,
                 "action_type": action_type,
-                "provenance_id": proposed_action.provenance_id,
-                "performed": False,
-                "refusal_reason": refusal,
+                "missing": sorted(missing),
             },
         )
         result = ExecutionResult(
@@ -527,4 +552,3 @@ def authorize_and_perform(
     )
     _emit_action_executed(result)
     return result
-
