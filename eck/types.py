@@ -29,6 +29,9 @@ from typing import Literal, NamedTuple
 
 # ── Critic outcome taxonomy (ADR-022) ─────────────────────────────────────────
 
+CriticCategory = Literal["success", "partial", "failure", "rejected", "deferred"]
+
+
 class CriticOutcome(NamedTuple):
     """
     Primary epistemic signal produced by the critic and consumed by the
@@ -55,14 +58,14 @@ class CriticOutcome(NamedTuple):
     success: derived convenience bool — True only when category == "success"
         Never set directly — use make_critic_outcome() to construct.
     """
-    category: Literal["success", "partial", "failure", "rejected", "deferred"]
+    category: CriticCategory
     severity: float
     feedback: str
     success: bool
 
 
 def make_critic_outcome(
-    category: Literal["success", "partial", "failure", "rejected", "deferred"],
+    category: CriticCategory,
     severity: float,
     feedback: str,
 ) -> CriticOutcome:
