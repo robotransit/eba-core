@@ -105,7 +105,7 @@ class ECKAgent:
 
         if self._enable_embeddings:
             try:  # pragma: no cover
-                from sentence_transformers import SentenceTransformer
+                from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
 
                 self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
             except Exception:
