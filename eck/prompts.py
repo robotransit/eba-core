@@ -14,6 +14,7 @@ ADR-033 compliance (removed prompts):
     in critic.py which uses the ADR-022 compliant outcome/severity schema.
 """
 
+from typing import Any
 
 INITIAL_TASK_PROMPT_TEMPLATE = """
 Generate the very first concrete task to start pursuing the objective: {objective}
@@ -46,6 +47,6 @@ Return ONLY a brief string prediction of the result.
 """
 
 
-def format_prompt(template: str, **kwargs) -> str:
+def format_prompt(template: str, **kwargs: Any) -> str:
     """Format a prompt template with variables."""
     return template.format(**kwargs)
