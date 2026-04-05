@@ -192,16 +192,16 @@ class ConfidenceSignal:
             return self._value
 
         # 1. Compute raw delta
-        delta_raw = self._compute_raw_delta(outcome)
+        delta_raw = self._compute_raw_delta(outcome)  # type: ignore[attr-defined]
 
         # 2. Derive base and effective movement class (ADR-023)
-        base_class, effective_class = self._derive_base_and_effective_class(
+        base_class, effective_class = self._derive_base_and_effective_class(  # type: ignore[attr-defined]
             outcome, partial_structure, prior_failure_window_active
         )
 
         # 3. Apply gated clamp to both raw delta and prior smoothed delta
-        permitted_raw = self._apply_gated_clamp(delta_raw, effective_class)
-        permitted_prior = self._apply_gated_clamp(prior_smoothed_delta, effective_class)
+        permitted_raw = self._apply_gated_clamp(delta_raw, effective_class)  # type: ignore[attr-defined]
+        permitted_prior = self._apply_gated_clamp(prior_smoothed_delta, effective_class)  # type: ignore[attr-defined]
 
         # 4. Gated EWMA smoothing (ADR-025)
         delta_smoothed = (
