@@ -16,7 +16,7 @@ Design principles (ADR-040):
 from __future__ import annotations
 
 import statistics
-from typing import List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from .config import ECKConfig, PolicyMode
 from .utils import safe_mean, z_score
@@ -35,7 +35,7 @@ class DriftMonitor:
     - Treating this instance as append-only evidence (ADR-040 Section 3)
     """
 
-    def __init__(self, config: ECKConfig = None) -> None:
+    def __init__(self, config: ECKConfig | None = None) -> None:
         self.config = config or ECKConfig()
 
         # ── Append-only evidence stores (ADR-040) ─────────────────────
@@ -87,7 +87,7 @@ class DriftMonitor:
         if not numeric_successes:
             return
 
-        conf = safe_mean(numeric_successes)
+        conf = safe_mean([float(x) for x in numeric_successes])
         if conf > self.config.feas_conf_high:
             self.numeric_bias = min(1.3, self.numeric_bias * 1.1)
         elif conf < self.config.feas_conf_low:
@@ -126,7 +126,7 @@ class DriftMonitor:
             return True
 
         numeric_successes = [s for f, s in self.feasibility_history if f]
-        if numeric_successes and safe_mean(numeric_successes) < self.config.low_conf_threshold:
+        if numeric_successes and safe_mean([float(x) for x in numeric_successes]) < self.config.low_conf_threshold:
             return True
 
         return False
@@ -172,7 +172,7 @@ class DriftMonitor:
         """Return the total number of drift events recorded (audit surface)."""
         return len(self.drift_events)
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, Any]:
         """
         Return a read-only snapshot of current drift state for logging.
 
@@ -186,6 +186,6 @@ class DriftMonitor:
             "last_error_z": self.last_error_z,
             "numeric_bias": self.numeric_bias,
             "feasibility_sample_count": len(self.feasibility_history),
-            "numeric_success_rate": safe_mean(numeric_successes) if numeric_successes else None,
+            "numeric_success_rate": safe_mean([float(x) for x in numeric_successes]) if numeric_successes else None,
             "severe": self.severe(),
         }
