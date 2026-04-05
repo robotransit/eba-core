@@ -38,6 +38,7 @@ from typing import Callable, Literal, Optional
 from eck.types import (
     ConflictKind,
     ConflictLocus,
+    CriticCategory,
     CriticOutcome,
     ExecutionResult,
     PartialStructure,
@@ -159,7 +160,7 @@ def critic_evaluate(
     # No LLM call, no partial structure, no confidence update path.
     # Category is derived deterministically from refusal_reason.
     if not result.performed:
-        category = _map_refusal_to_category(result.refusal_reason)
+        category: CriticCategory = _map_refusal_to_category(result.refusal_reason)
         feedback = result.refusal_reason or "Execution refused"
         logger.info(
             "Critic short-circuit — execution not performed",
@@ -182,7 +183,7 @@ def critic_evaluate(
     outcome1, severity1, feedback1, raw_kind1, raw_footprint1 = _parse_critic_response(raw1)
 
     # Derive category from first call before any severity modification.
-    category1 = _derive_category(outcome1, severity1, partial_threshold)
+    category1: CriticCategory = _derive_category(outcome1, severity1, partial_threshold)
 
     if not enable_cross_validation:
         category = category1
@@ -195,7 +196,7 @@ def critic_evaluate(
         raw2 = llm_call(prompt)
         outcome2, severity2, feedback2, raw_kind2, raw_footprint2 = _parse_critic_response(raw2)
 
-        category2 = _derive_category(outcome2, severity2, partial_threshold)
+        category2: CriticCategory = _derive_category(outcome2, severity2, partial_threshold)
 
         if category1 != category2:
             logger.warning(
@@ -443,7 +444,7 @@ def _derive_category(
     outcome: str,
     severity: float,
     partial_threshold: float,
-) -> str:
+) -> Literal["success", "partial", "failure"]:
     """
     Derive ADR-022 category from LLM-reported outcome and severity.
 
