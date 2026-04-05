@@ -1,7 +1,7 @@
 # .github/workflows/codeql.yml
 # Static Analysis Layer — ADR-046
 # python/security-extended — blocking from day one
-# python/quality — non-blocking initially
+# python/quality — non-blocking initially (not included in this minimal version)
 name: CodeQL
 
 on:
@@ -25,15 +25,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v3   # v3 is still supported for now
         with:
           languages: python
-          queries: security-extended,quality
+          queries: security-extended
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
-      - name: Perform CodeQL Analysis
+      - name: Perform CodeQL Analysis (security-extended — blocking)
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:python"
