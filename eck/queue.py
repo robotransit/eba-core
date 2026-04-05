@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("eck-core")
 
@@ -41,10 +41,10 @@ class TaskQueue:
         """
         if max_size < 1:
             raise ValueError(f"max_size must be >= 1, got {max_size}")
-        self.queue: deque[Dict] = deque()
+        self.queue: deque[dict[str, Any]] = deque()
         self.max_size = max_size
 
-    def push(self, task: Dict) -> None:
+    def push(self, task: dict[str, Any]) -> None:
         """
         Add a task to the end of the queue.
 
@@ -67,7 +67,7 @@ class TaskQueue:
             )
         self.queue.append(task)
 
-    def pop(self) -> Optional[Dict]:
+    def pop(self) -> Optional[dict[str, Any]]:
         """Remove and return the oldest task, or None if empty."""
         return self.queue.popleft() if self.queue else None
 
@@ -75,7 +75,7 @@ class TaskQueue:
         """Return True if the queue contains no tasks."""
         return len(self.queue) == 0
 
-    def as_list(self) -> List[Dict]:
+    def as_list(self) -> list[dict[str, Any]]:
         """
         Return a snapshot of all pending tasks as a list.
 
