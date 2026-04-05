@@ -26,8 +26,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, NamedTuple
 
-import icontract
-
 
 # ── Critic outcome taxonomy (ADR-022) ─────────────────────────────────────────
 
@@ -126,12 +124,6 @@ class PartialStructure(NamedTuple):
 
 # ── Execution boundary types (ADR-042) ────────────────────────────────────────
 
-# Admissible action types for ProposedAction (thin-slice)
-# Must be kept in sync with _WHITELISTED_ACTIONS in eck/execution.py
-# until the full action registry is formalised in v0.7.0.
-_ADMISSIBLE_ACTION_TYPES: frozenset[str] = frozenset({"llm_query"})
-
-
 @dataclass(frozen=True)
 class ProposedAction:
     """
@@ -164,14 +156,6 @@ class ProposedAction:
     task_id: str
     provenance_id: str
 
-    @icontract.require(
-        lambda self: self.action_type in _ADMISSIBLE_ACTION_TYPES,
-        "action_type must be in the admissible action type surface"
-    )
-    @icontract.require(
-        lambda self: all(not callable(v) for v in self.parameters.values()),
-        "parameters must not contain callable values"
-    )
     def __post_init__(self) -> None:
         if not self.action_type or not self.action_type.strip():
             raise ValueError(
