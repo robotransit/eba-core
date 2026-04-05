@@ -32,8 +32,7 @@ jobs:
         run: |
           pip install -e ".[test]"
           pip install mypy
-      - name: Run mypy (ADR-046 curated profile - non-blocking)
-        continue-on-error: true
+      - name: Run mypy (ADR-046 curated profile - blocking)
         run: |
           mypy eck --config-file pyproject.toml
       - name: Run deterministic core tests
