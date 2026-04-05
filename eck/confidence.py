@@ -81,6 +81,73 @@ class ConfidenceSignal:
         # ADR-024 whitelist boundary (critic-only for now)
         self._admissible_signals: set[str] = {"critic"}
 
+    def _compute_raw_delta(self, outcome: CriticOutcome) -> float:
+        """Compute raw directional delta from critic outcome (ADR-022/025)."""
+        if outcome.category == "success":
+            return 0.35 - (0.25 * outcome.severity)
+
+        if outcome.category == "failure":
+            return -outcome.severity
+
+        if outcome.category == "partial":
+            return self._compute_partial_raw_delta(outcome.severity)
+
+        if outcome.category in ("rejected", "deferred"):
+            return 0.0
+
+        raise ValueError(f"Unknown critic outcome category: {outcome.category}")
+
+    def _compute_partial_raw_delta(self, severity: float) -> float:
+        """Severity-based bidirectional but downward-biased raw delta for partial."""
+        if severity <= _PARTIAL_MIDPOINT:
+            return (_PARTIAL_MIDPOINT - severity) * _PARTIAL_UPWARD_SCALE
+        else:
+            return -(severity - _PARTIAL_MIDPOINT) * _PARTIAL_DOWNWARD_SCALE
+
+    def _derive_base_and_effective_class(
+        self,
+        outcome: CriticOutcome,
+        partial_structure: Optional[PartialStructure],
+        prior_failure_window_active: bool,
+    ) -> tuple[MovementClass, MovementClass]:
+        """Derive base_class and effective_class (ADR-023)."""
+        if outcome.category == "partial":
+            if partial_structure is None:
+                raise ValueError("Partial outcome must be accompanied by PartialStructure")
+            base_class = _KIND_TO_MOVEMENT_CLASS[partial_structure.conflict_kind]
+        else:
+            if partial_structure is not None:
+                raise ValueError("PartialStructure is only valid for partial outcomes")
+            base_class = MovementClass.BOTH
+
+        effective_class = base_class
+
+        # Single-cycle failure window restriction (ADR-023)
+        if prior_failure_window_active:
+            if base_class is MovementClass.BOTH:
+                effective_class = MovementClass.DOWN_ONLY
+            elif base_class is MovementClass.UP_ONLY:
+                # UP_ONLY is not reachable from the current ConflictKind taxonomy
+                # (_KIND_TO_MOVEMENT_CLASS has no UP_ONLY mapping). This branch
+                # is retained for future ConflictKind extensions.
+                effective_class = MovementClass.NEITHER  # pragma: no cover
+
+        return base_class, effective_class
+
+    def _apply_gated_clamp(self, delta: float, movement_class: MovementClass) -> float:
+        """Clamp delta according to movement class (ADR-023)."""
+        if movement_class is MovementClass.BOTH:
+            return delta
+        if movement_class is MovementClass.UP_ONLY:
+            # UP_ONLY is not reachable from the current ConflictKind taxonomy.
+            # Retained for future ConflictKind extensions.
+            return max(0.0, delta)  # pragma: no cover
+        if movement_class is MovementClass.DOWN_ONLY:
+            return min(0.0, delta)
+        if movement_class is MovementClass.NEITHER:
+            return 0.0
+        raise ValueError("unreachable movement class")  # pragma: no cover
+
     def update(
         self,
         outcome: CriticOutcome,
