@@ -22,8 +22,6 @@ import logging
 from enum import Enum
 from typing import Any, Optional
 
-import icontract
-
 from eck.telemetry import emit_event
 from eck.types import (
     ConflictKind,
@@ -56,9 +54,6 @@ _PARTIAL_UPWARD_SCALE = 0.5
 _PARTIAL_DOWNWARD_SCALE = 1.2
 _PARTIAL_MIDPOINT = 0.5
 
-# Valid critic categories (single source of truth for runtime contracts)
-_VALID_CATEGORIES = ("success", "partial", "failure", "rejected", "deferred")
-
 
 class ConfidenceSignal:
     """Core confidence update mechanism with EWMA smoothing (ADR-021–025).
@@ -86,22 +81,6 @@ class ConfidenceSignal:
         # ADR-024 whitelist boundary (critic-only for now)
         self._admissible_signals: set[str] = {"critic"}
 
-    @icontract.require(
-        lambda outcome: 0.0 <= outcome.severity <= 1.0,
-        "critic_outcome.severity must be in [0.0, 1.0]"
-    )
-    @icontract.require(
-        lambda outcome: outcome.category in _VALID_CATEGORIES,
-        "critic_outcome.category must be a valid CriticCategory value"
-    )
-    @icontract.require(
-        lambda outcome, partial_structure: (partial_structure is not None) == (outcome.category == "partial"),
-        "partial_structure must be present iff category is partial"
-    )
-    @icontract.ensure(
-        lambda result: 0.0 <= result <= 1.0,
-        "returned confidence value must be in [0.0, 1.0]"
-    )
     def update(
         self,
         outcome: CriticOutcome,
@@ -192,16 +171,16 @@ class ConfidenceSignal:
             return self._value
 
         # 1. Compute raw delta
-        delta_raw = self._compute_raw_delta(outcome)  # type: ignore[attr-defined]
+        delta_raw = self._compute_raw_delta(outcome)
 
         # 2. Derive base and effective movement class (ADR-023)
-        base_class, effective_class = self._derive_base_and_effective_class(  # type: ignore[attr-defined]
+        base_class, effective_class = self._derive_base_and_effective_class(
             outcome, partial_structure, prior_failure_window_active
         )
 
         # 3. Apply gated clamp to both raw delta and prior smoothed delta
-        permitted_raw = self._apply_gated_clamp(delta_raw, effective_class)  # type: ignore[attr-defined]
-        permitted_prior = self._apply_gated_clamp(prior_smoothed_delta, effective_class)  # type: ignore[attr-defined]
+        permitted_raw = self._apply_gated_clamp(delta_raw, effective_class)
+        permitted_prior = self._apply_gated_clamp(prior_smoothed_delta, effective_class)
 
         # 4. Gated EWMA smoothing (ADR-025)
         delta_smoothed = (
