@@ -103,7 +103,7 @@ def _core_retrieve_scored(
 # ── Private helper for cosine score ──────────────────────────────────────────
 # pragma: no cover — requires numpy (optional extras, capability layer only)
 
-def _cosine_score(query_emb, task_emb, np) -> float:  # pragma: no cover
+def _cosine_score(query_emb: Any, task_emb: Any, np: Any) -> float:  # pragma: no cover
     """Compute cosine similarity with zero-norm guard."""
     norm_q = np.linalg.norm(query_emb)
     norm_t = np.linalg.norm(task_emb)
