@@ -328,7 +328,7 @@ class TestProposeExecutionTelemetry(unittest.TestCase):
         self.assertFalse(event["payload"]["proposal_present"])
         self.assertEqual(
             event["payload"]["proposal_refusal_reason"],
-            "missing_required_parameters",
+            "missing_required_parameters:prompt",
         )
 
     def test_construction_failure_emits_construction_failure(self) -> None:
