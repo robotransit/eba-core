@@ -33,7 +33,6 @@ test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "mypy",
-    "icontract",        # ADR-046: runtime contract enforcement
 ]
 
 [build-system]
