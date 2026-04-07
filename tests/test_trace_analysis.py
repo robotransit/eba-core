@@ -28,15 +28,17 @@ class TestTraceAnalysis(unittest.TestCase):
         events = self.analyzer.get_trace("t1")
         events[0]["severity"] = "MUTATED"
         summary = self.analyzer.summarise_trace("t1")
+        self.assertIsNotNone(summary)
         self.assertEqual(summary["severity_counts"], {"INFO": 1})
 
     def test_invalid_trace_id_skipped(self) -> None:
-        """Non-string, None, or missing trace_id events are silently skipped."""
+        """Non-string, None, missing, empty, or whitespace-only trace_id events are silently skipped."""
         events = [
             {"event_type": "step"},
             {"trace_id": None, "event_type": "step"},
             {"trace_id": 123, "event_type": "step"},
             {"trace_id": "", "event_type": "step"},
+            {"trace_id": "   ", "event_type": "step"},
         ]
         self.analyzer.ingest(events)
         self.assertEqual(self.analyzer.list_traces(), [])
@@ -56,10 +58,26 @@ class TestTraceAnalysis(unittest.TestCase):
     def test_summarise_trace_unknown_trace_returns_none(self) -> None:
         self.assertIsNone(self.analyzer.summarise_trace("nonexistent"))
 
+    def test_summarise_trace_key_set(self) -> None:
+        """summarise_trace must return exactly the committed minimal key set."""
+        self.analyzer.ingest([{"trace_id": "t1", "event_type": "step", "severity": "INFO"}])
+        summary = self.analyzer.summarise_trace("t1")
+        self.assertIsNotNone(summary)
+        self.assertEqual(set(summary.keys()), {"trace_id", "event_count", "event_types", "severity_counts"})
+
     def test_render_trace_unknown_trace(self) -> None:
         output = self.analyzer.render_trace("nonexistent")
         self.assertIn("nonexistent", output)
         self.assertIn("no events", output.lower())
+
+    def test_summarise_and_render_missing_severity_handling_differ(self) -> None:
+        """summarise_trace normalises missing severity to UNKNOWN; render_trace shows <missing>."""
+        self.analyzer.ingest([{"trace_id": "t1", "event_type": "step"}])
+        summary = self.analyzer.summarise_trace("t1")
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["severity_counts"], {"UNKNOWN": 1})
+        rendered = self.analyzer.render_trace("t1")
+        self.assertIn("<missing>", rendered)
 
     def test_list_traces_is_sorted(self) -> None:
         self.analyzer.ingest([
