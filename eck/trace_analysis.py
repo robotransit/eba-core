@@ -21,6 +21,7 @@ STRUCTURAL GUARDS
 """
 
 from copy import deepcopy
+from typing import Any
 
 
 # Minimal first version only.
@@ -28,10 +29,10 @@ from copy import deepcopy
 class TraceAnalyzer:
     # Returns plain data only. Must never be consumed by control surfaces.
     def __init__(self) -> None:
-        self._traces: dict[str, list[dict]] = {}
+        self._traces: dict[str, list[dict[str, Any]]] = {}
 
     # Returns plain data only. Must never be consumed by control surfaces.
-    def ingest(self, events: list[dict]) -> None:
+    def ingest(self, events: list[dict[str, Any]]) -> None:
         for event in events:
             trace_id = event.get("trace_id")
             if not isinstance(trace_id, str):
@@ -47,7 +48,7 @@ class TraceAnalyzer:
         return sorted(self._traces.keys())
 
     # Returns plain data only. Must never be consumed by control surfaces.
-    def get_trace(self, trace_id: str) -> list[dict]:
+    def get_trace(self, trace_id: str) -> list[dict[str, Any]]:
         events = self._traces.get(trace_id, [])
         return [deepcopy(event) for event in events]
 
@@ -56,7 +57,7 @@ class TraceAnalyzer:
         self,
         event_type: str,
         trace_id: str | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         if trace_id is not None:
             events = self._traces.get(trace_id, [])
             return [
@@ -65,7 +66,7 @@ class TraceAnalyzer:
                 if event.get("event_type") == event_type
             ]
 
-        result: list[dict] = []
+        result: list[dict[str, Any]] = []
         for events in self._traces.values():
             for event in events:
                 if event.get("event_type") == event_type:
@@ -73,14 +74,14 @@ class TraceAnalyzer:
         return result
 
     # Returns plain data only. Must never be consumed by control surfaces.
-    def summarise_trace(self, trace_id: str) -> dict | None:
+    def summarise_trace(self, trace_id: str) -> dict[str, Any] | None:
         events = self._traces.get(trace_id)
         if not events:
             return None
 
         event_types: list[str] = []
         seen_event_types: set[str] = set()
-        severity_counts: dict = {}
+        severity_counts: dict[str, int] = {}
 
         for event in events:
             event_type = event.get("event_type")
