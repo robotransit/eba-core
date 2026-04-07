@@ -35,7 +35,9 @@ class TraceAnalyzer:
     def ingest(self, events: list[dict[str, Any]]) -> None:
         for event in events:
             trace_id = event.get("trace_id")
-            if not isinstance(trace_id, str):
+            # Skip invalid trace_ids: None, non-string, empty, or whitespace-only.
+            # A trace_id that is only whitespace is meaningless and treated the same as missing.
+            if not isinstance(trace_id, str) or not trace_id.strip():
                 continue
 
             if trace_id not in self._traces:
@@ -89,8 +91,10 @@ class TraceAnalyzer:
                 seen_event_types.add(event_type)
                 event_types.append(event_type)
 
-            # Treat missing or empty severity as "UNKNOWN" (falsy values are meaningless here)
-            severity = event.get("severity") or "UNKNOWN"
+            # Explicit normalisation: missing key, None, or empty string all become "UNKNOWN"
+            severity = event.get("severity")
+            if severity in (None, ""):
+                severity = "UNKNOWN"
             severity_counts[severity] = severity_counts.get(severity, 0) + 1
 
         return {
@@ -105,9 +109,15 @@ class TraceAnalyzer:
         events = self._traces.get(trace_id, [])
 
         lines: list[str] = [f"trace_id={trace_id}"]
-        for event in events:
-            event_type = event.get("event_type", "<missing>")
-            severity = event.get("severity", "<missing>")
-            lines.append(f"{event_type} {severity}")
+        if not events:
+            lines.append("no events")
+        else:
+            for event in events:
+                event_type = event.get("event_type", "<missing>")
+                # Note: render_trace deliberately does NOT normalise severity the same way
+                # as summarise_trace. It shows the raw value (including None or "") for
+                # better operator debugging.
+                severity = event.get("severity", "<missing>")
+                lines.append(f"{event_type} {severity}")
 
         return "\n".join(lines)
