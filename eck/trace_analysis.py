@@ -95,7 +95,8 @@ class TraceAnalyzer:
             severity = event.get("severity")
             if severity in (None, ""):
                 severity = "UNKNOWN"
-            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+            # mypy cannot narrow the type through reassignment; str() makes the type explicit for the dict key
+            severity_counts[str(severity)] = severity_counts.get(str(severity), 0) + 1
 
         return {
             "trace_id": trace_id,
