@@ -27,9 +27,9 @@ from .execution import propose_execution, authorize_and_perform
 from .policy_gate import DefaultPolicyGate, PolicyContext, ExecutionMode, PolicyGate
 from .telemetry import emit_event, make_step_id
 from .types import ExecutionResult
+from .trace_analysis import TraceAnalyzer
 
 logger = logging.getLogger("eck-core")
-
 
 # Policy ordering for safe, irreversible upgrades
 _POLICY_ORDER = {
@@ -59,6 +59,7 @@ class ECKAgent:
         llm_call: Callable[[str], str],
         config: ECKConfig | None = None,
         policy_gate: PolicyGate | None = None,
+        trace_analyzer: TraceAnalyzer | None = None,
     ):
         self.objective = objective
         self.llm = llm_call
@@ -96,6 +97,11 @@ class ECKAgent:
         # gate implementations. Stored privately to prevent runtime
         # reassignment — consistent with agent_loop.py invariant.
         self._policy_gate: PolicyGate = policy_gate or DefaultPolicyGate()
+
+        # One-way observational sink only. Optional — if absent, no analysis
+        # occurs and agent behaviour is completely unchanged.
+        # Analyzer outputs must never be consumed by any control surface.
+        self._trace_analyzer: TraceAnalyzer | None = trace_analyzer
 
         # ── Optional embeddings wiring (ADR-032) ─────────────────────────────────────
         # Model loading happens once at construction, gated by config.
@@ -178,6 +184,14 @@ class ECKAgent:
         step_nonce = self.cycles
         step_id = make_step_id(self._trace_id, step_nonce)
 
+        step_start_payload = {
+            "objective": self.objective,
+            "queue_length": queue_length_at_start,
+            "policy_mode": self.current_policy_mode.name,
+            "task_text": task_text,
+            "task_id": task_id,
+            "current_confidence": self._confidence.get_value(),
+        }
         emit_event(
             "step.start",
             trace_id=self._trace_id,
@@ -185,16 +199,22 @@ class ECKAgent:
             deterministic_nonce=step_nonce,
             severity="INFO",
             source="agent",
-            payload={
-                "objective": self.objective,
-                "queue_length": queue_length_at_start,
-                "policy_mode": self.current_policy_mode.name,
-                "task_text": task_text,
-                "task_id": task_id,
-                "current_confidence": self._confidence.get_value(),
-            },
+            payload=step_start_payload,
             logger=logger,
         )
+        if self._trace_analyzer is not None:
+            # One-way observational sink only.
+            # This is a fresh plain dict snapshot, not a live kernel object.
+            # Analyzer outputs must never be consumed by any control surface.
+            self._trace_analyzer.ingest([{
+                "event_type": "step.start",
+                "trace_id": self._trace_id,
+                "step_id": step_id,
+                "deterministic_nonce": step_nonce,
+                "severity": "INFO",
+                "source": "agent",
+                "payload": {k: v for k, v in step_start_payload.items()},
+            }])
 
         def _end(
             continued: bool,
@@ -232,6 +252,20 @@ class ECKAgent:
                 payload=payload,
                 logger=logger,
             )
+            if self._trace_analyzer is not None:
+                # One-way observational sink only.
+                # This is a fresh plain dict snapshot, not a live kernel object.
+                # Analyzer outputs must never be consumed by any control surface.
+                # Fresh payload snapshot. Current payload values are scalar/plain.
+                self._trace_analyzer.ingest([{
+                    "event_type": "step.end",
+                    "trace_id": self._trace_id,
+                    "step_id": step_id,
+                    "deterministic_nonce": step_nonce,
+                    "severity": severity,
+                    "source": "agent",
+                    "payload": {k: v for k, v in payload.items()},
+                }])
             return continued
 
         # 1. Prediction
