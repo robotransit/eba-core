@@ -13,7 +13,8 @@ Design principle:
 
 Sequences covered:
   - Failure → blocked cycle → recovery
-    (failure window opens, propagates into gate context, then clears)
+    (failure window opens, propagates into gate context, consumed on
+    rejected cycle, confidence recovers on success)
   - Failure → partial → recovery
     (confidence trajectory across mixed outcomes with active failure window)
   - Policy mode escalation under drift stress
@@ -37,6 +38,8 @@ from eck.policy_gate import (
     PolicyGate,
 )
 from eck.types import (
+    ConflictKind,
+    ConflictLocus,
     CriticOutcome,
     ExecutionResult,
     PartialStructure,
@@ -163,7 +166,8 @@ def _run_refusal_cycle(
                                             for the caller to assert not called
 
     Gate is set to RETRY. All drift machinery and orthogonal surfaces are
-    patched. Confidence runs real — a rejected cycle must not update it.
+    patched. Confidence runs real — a rejected cycle consumes the failure
+    window per the confidence.py contract (ADR-023).
     """
     gate.evaluate.return_value = _gate_decision(ExecutionMode.RETRY)
 
@@ -190,17 +194,17 @@ def _run_refusal_cycle(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFailureRecoverySequence(unittest.TestCase):
-    """Failure window opens, propagates into gate context, then clears on recovery.
+    """Failure window opens, propagates into gate context, then is consumed.
 
     Confidence runs real. Gate behavior is controlled per cycle.
     Drift machinery is patched as orthogonal.
 
-    Sequence:
+    Sequence (aligned to confidence.py ADR-023 contract):
         Cycle 1: EXECUTE + failure  → failure window opens
         Cycle 2: gate refuses       → failure_window_active=True in gate context,
-                                      execution blocked, window still open,
-                                      confidence unchanged
-        Cycle 3: EXECUTE + success  → failure window clears, confidence recovers
+                                      execution blocked, confidence unchanged,
+                                      window consumed and cleared by rejected path
+        Cycle 3: EXECUTE + success  → confidence recovers from post-failure value
     """
 
     def test_failure_window_opens_blocks_then_clears(self) -> None:
@@ -220,23 +224,24 @@ class TestFailureRecoverySequence(unittest.TestCase):
         confidence_after_failure = a._confidence.get_value()
 
         # Cycle 2: gate refuses — failure_window_active=True must reach the gate,
-        # execution must be blocked, confidence must not change.
+        # execution must be blocked, confidence must not change numerically.
+        # Per ADR-023: the rejected path consumes and clears the failure window.
         a.seed("task2")
         _, gate_kwargs, mock_auth = _run_refusal_cycle(a, agent_mod, gate)
 
         self.assertTrue(gate_kwargs["context"].failure_window_active)
         mock_auth.assert_not_called()
-        self.assertTrue(a._confidence._last_outcome_was_failure)
         self.assertEqual(a._confidence.get_value(), confidence_after_failure)
+        # Window is consumed and cleared by the rejected cycle (ADR-023)
+        self.assertFalse(a._confidence._last_outcome_was_failure)
 
-        # Cycle 3: gate permits, success → window clears, confidence recovers
+        # Cycle 3: gate permits, success → confidence recovers upward
         a.seed("task3")
         _run_cycle(a, agent_mod,
                    gate_mode=ExecutionMode.EXECUTE,
                    critic_category="success",
                    critic_severity=0.1)
 
-        self.assertFalse(a._confidence._last_outcome_was_failure)
         self.assertGreater(a._confidence.get_value(), confidence_after_failure)
 
 
@@ -256,7 +261,6 @@ class TestFailurePartialRecoverySequence(unittest.TestCase):
 
     def test_confidence_trajectory_across_failure_partial_success(self) -> None:
         import eck.agent as agent_mod
-        from eck.types import ConflictKind, ConflictLocus
 
         gate = MagicMock(spec=PolicyGate)
         a = _agent(gate=gate, goal_completion_threshold=0.99)
@@ -278,7 +282,8 @@ class TestFailurePartialRecoverySequence(unittest.TestCase):
         # Per ADR-021–025, the failure window restricts upward movement —
         # confidence must not increase from its post-failure value.
         partial_structure = PartialStructure(
-            conflict_kind=ConflictKind.EVIDENCE,
+            collapse_status="unresolved",
+            conflict_kind=ConflictKind.EVIDENCE_CONFLICT,
             conflict_footprint=frozenset({ConflictLocus.LOCAL}),
         )
         gate.evaluate.return_value = _gate_decision(ExecutionMode.EXECUTE)
