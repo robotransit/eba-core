@@ -14,7 +14,8 @@ Design principle:
 Sequences covered:
   - Failure → blocked cycle → recovery
     (failure window opens, propagates into gate context, consumed on
-    rejected cycle, confidence recovers on success)
+    rejected cycle, confidence eventually recovers under subsequent
+    success cycles)
   - Failure → partial → recovery
     (confidence trajectory across mixed outcomes with active failure window)
   - Policy mode escalation under drift stress
@@ -246,17 +247,20 @@ class TestFailureRecoverySequence(unittest.TestCase):
 
 
 class TestFailurePartialRecoverySequence(unittest.TestCase):
-    """Confidence trajectory across failure → partial → success.
+    """Confidence trajectory across failure → partial → recovery.
 
     Confidence runs real. Drift machinery is patched as orthogonal.
 
     Sequence:
         Cycle 1: failure  → confidence drops, window opens
-        Cycle 2: partial  → failure window still active;
-                            confidence must not move upward
-                            (failure window restricts upward movement on partial
-                            outcomes — locked semantic per ADR-021–025)
-        Cycle 3: success  → confidence recovers upward
+        Cycle 2: partial  → failure window active; effective class is DOWN_ONLY
+                            (EVIDENCE_CONFLICT + active window → DOWN_ONLY per ADR-023);
+                            confidence must not move upward;
+                            partial clears _last_outcome_was_failure (not "failure" category)
+        Cycles 3+: success → unclamped; first success may still be net-negative
+                             due to EWMA carry from prior negative momentum (ADR-025);
+                             this sequence demonstrates eventual recovery once the
+                             window is clear and negative momentum is exhausted
     """
 
     def test_confidence_trajectory_across_failure_partial_success(self) -> None:
@@ -278,9 +282,11 @@ class TestFailurePartialRecoverySequence(unittest.TestCase):
         self.assertLess(confidence_after_failure, confidence_initial)
         self.assertTrue(a._confidence._last_outcome_was_failure)
 
-        # Cycle 2: partial outcome with failure window still active.
-        # Per ADR-021–025, the failure window restricts upward movement —
-        # confidence must not increase from its post-failure value.
+        # Cycle 2: partial outcome with failure window active.
+        # EVIDENCE_CONFLICT + active window → effective class DOWN_ONLY (ADR-023).
+        # Confidence must not move upward from post-failure value.
+        # Partial clears _last_outcome_was_failure because only category "failure"
+        # sets it True in confidence.update() step 6.
         partial_structure = PartialStructure(
             collapse_status="unresolved",
             conflict_kind=ConflictKind.EVIDENCE_CONFLICT,
@@ -311,16 +317,25 @@ class TestFailurePartialRecoverySequence(unittest.TestCase):
             a.step()
 
         confidence_after_partial = a._confidence.get_value()
+        # Failure window restricts upward movement — confidence must not rise
         self.assertLessEqual(confidence_after_partial, confidence_after_failure)
+        # Partial clears the failure window (only "failure" category sets it True)
+        self.assertFalse(a._confidence._last_outcome_was_failure)
 
-        # Cycle 3: success → confidence recovers upward
-        a.seed("task3")
-        _run_cycle(a, agent_mod,
-                   gate_mode=ExecutionMode.EXECUTE,
-                   critic_category="success",
-                   critic_severity=0.1)
+        # Cycles 3+: success cycles are now unclamped.
+        # Four max-positive success cycles (severity=0.0) are used here to
+        # overpower the prior negative EWMA carry and demonstrate recovery.
+        # The first success may still be net-negative due to momentum (ADR-025);
+        # we assert eventual recovery above the post-failure value, not
+        # single-cycle recovery.
+        for i in range(4):
+            a.seed(f"recovery_{i}")
+            _run_cycle(a, agent_mod,
+                       gate_mode=ExecutionMode.EXECUTE,
+                       critic_category="success",
+                       critic_severity=0.0)
 
-        self.assertGreater(a._confidence.get_value(), confidence_after_partial)
+        self.assertGreater(a._confidence.get_value(), confidence_after_failure)
 
 
 class TestPolicyModeEscalationSequence(unittest.TestCase):
