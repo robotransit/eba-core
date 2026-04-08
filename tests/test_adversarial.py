@@ -274,21 +274,31 @@ class TestGoalCompletionUnderSuppression(unittest.TestCase):
 
 
 class TestPostFailureGateSuppression(unittest.TestCase):
-    """Failure window must suppress the immediately following execution attempt."""
+    """Failure window propagates into gate context on the immediately following cycle.
 
-    def test_failure_window_blocks_next_execution_at_gate(self) -> None:
-        """After a failure cycle, the gate sees failure_window_active=True
-        on the very next cycle and execution is refused."""
+    This test is scoped to one seam only:
+        confidence failure window → PolicyContext.failure_window_active → gate refusal
+
+    Drift escalation, error recording, feasibility tracking, and subtask
+    generation are held constant via explicit patches because they are
+    orthogonal to this invariant. Both cycles use the same patch set for
+    symmetry and to make the isolation claim literal.
+    """
+
+    def test_failure_window_propagates_to_gate_context_on_next_cycle(self) -> None:
         import eck.agent as agent_mod
 
         gate = MagicMock(spec=PolicyGate)
         gate.evaluate.side_effect = [
-            _gate_decision(ExecutionMode.EXECUTE),
-            _gate_decision(ExecutionMode.RETRY),
+            _gate_decision(ExecutionMode.EXECUTE),   # cycle 1: permit execution
+            _gate_decision(ExecutionMode.RETRY),     # cycle 2: refuse — window active
         ]
         a = _agent(gate=gate, goal_completion_threshold=0.99)
 
-        # Cycle 1: executed, critic says failure → failure window opens
+        # Cycle 1: execution is permitted, critic returns failure.
+        # This opens the confidence failure window.
+        # Drift escalation, error recording, and feasibility tracking are
+        # held constant — all orthogonal to this test.
         a.seed("task1")
         with patch.object(agent_mod, "propose_execution",
                           return_value=_mock_proposal()), \
@@ -298,13 +308,20 @@ class TestPostFailureGateSuppression(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate",
                           return_value=_critic("failure", severity=0.8)), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "get_policy_mode",
+                          return_value=PolicyMode.NORMAL), \
              patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "record_feasibility"), \
              patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
+        # Failure window must now be open.
         self.assertTrue(a._confidence._last_outcome_was_failure)
 
-        # Cycle 2: proposal exists, but gate sees failure_window_active=True
+        # Cycle 2: a new proposal exists.
+        # All orthogonal mechanisms still held constant — symmetric with cycle 1.
+        # The gate must receive failure_window_active=True
+        # and execution must be refused before authorize_and_perform is called.
         a.seed("task2")
         with patch.object(agent_mod, "propose_execution",
                           return_value=_mock_proposal()), \
@@ -313,6 +330,10 @@ class TestPostFailureGateSuppression(unittest.TestCase):
              patch.object(agent_mod, "critic_evaluate",
                           return_value=_critic("rejected")), \
              patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+             patch.object(a.drift, "get_policy_mode",
+                          return_value=PolicyMode.NORMAL), \
+             patch.object(a.drift, "record_error", return_value=False), \
+             patch.object(a.drift, "record_feasibility"), \
              patch.object(a.drift, "snapshot", return_value=_snap()):
             a.step()
 
