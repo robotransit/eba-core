@@ -1,9 +1,9 @@
 # TODO
 
-**Last updated:** 2026-04-02
+**Last updated:** 2026-04-09
 
-**Current design baseline:** v0.3.0 (architecture & invariants locked)
-**Current implementation state:** v0.3.0 complete and tagged
+**Current design baseline:** v0.3.0 (architecture & invariants locked)  
+**Current implementation state:** v0.4.0 complete (validation & enforcement layer; no new ADR baseline)
 
 ---
 
@@ -14,6 +14,8 @@
 The v0.2.0 architecture is fully implemented through ADR-020–ADR-041. All locked invariants have been converted into code, tested, and verified. CI green across Python 3.10, 3.11, and 3.12.
 
 See [docs/v0.2.0-implementation-checklist.md](docs/v0.2.0-implementation-checklist.md) for the full ADR-mapped completion record.
+
+---
 
 ### v0.3.0 — Complete and Tagged
 
@@ -26,15 +28,17 @@ All v0.3.0 deliverables are complete:
 
 598 tests passing. 98.48% coverage. CI green.
 
-### Deferred from v0.3.0
+---
 
-The following v0.3.0 items were explicitly deferred and remain open:
+### Deferred from v0.3.0 (Status after v0.4.0)
 
-- **Hypothesis / property-based testing** — deferred to v0.4.0 adversarial test lane
-- **mypy strict** — deferred to v0.4.0 mechanical enforcement layer
-- **CodeQL** — deferred to v0.4.0 mechanical enforcement layer
-- **icontract** — deferred to v0.4.0 mechanical enforcement layer
-- **Formal verification of authorize_and_perform** — deferred; appropriate before safety-critical domain deployment
+The following v0.3.0 items were deferred to v0.4.0. Their current status is:
+
+- **Hypothesis / property-based testing** — COMPLETE (v0.4.0 adversarial test lane)
+- **mypy strict** — COMPLETE via ADR-046 curated strict profile (blocking)
+- **CodeQL** — PARTIAL: `python/security-extended` enabled (blocking); `python/quality` deferred due to tooling constraints
+- **icontract** — CLOSED: evaluated and rejected (ADR-046); invariants enforced via typing, tests, and runtime structure
+- **Formal verification of authorize_and_perform** — STILL DEFERRED; appropriate before safety-critical domain deployment
 
 ---
 
@@ -42,13 +46,15 @@ The following v0.3.0 items were explicitly deferred and remain open:
 
 ### v0.4.0 — Trace Production and Empirical Foundation
 
+**Status:** Complete (scope partially realised; see completion summary)
+
 The first empirical phase. Meaningful characterisation requires the v0.3.0 execution surface and telemetry — both now in place.
 
-**Trace infrastructure:**
+**Trace infrastructure (planned scope):**
 - Operator-facing trace views and compact renderers — human-readable per-step summaries, confidence trajectory with policy overlays, reason/rule timelines
 - Read-only trace analysis service — anomaly detection, confidence/pathology pattern flagging, stuck mode and drift spike identification; must not feed back into runtime control
 
-**Adversarial test lane:**
+**Adversarial test lane (planned scope):**
 - `tests/adversarial/` — fuzz action proposals, fuzz policy contexts, stress queue and iteration boundaries, inject malformed critic outputs, simulate pathological traces
 - Hypothesis property-based tests for trace-level and sequence-level invariants:
   - no `step.start` without exactly one `step.end`
@@ -56,16 +62,40 @@ The first empirical phase. Meaningful characterisation requires the v0.3.0 execu
   - confidence monotonic constraints under failure windows
   - rejected/deferred → zero delta trajectories
 
-**Mechanical enforcement layer:**
+**Mechanical enforcement layer (planned scope):**
 - mypy strict — add to CI initially as non-blocking, then blocking
 - CodeQL — enable on repo
-- icontract — runtime contract enforcement for load-bearing invariants; best targets: `authorize_and_perform` authority boundary, `PolicyGate` signature conformance, `ProposedAction` schema surface, confidence update invariants, telemetry event envelope validity
+- icontract — runtime contract enforcement for load-bearing invariants
 
-**Empirical benchmarking (initial):**
+**Empirical benchmarking (planned scope):**
 - Task success rate with ECK vs without ECK on equivalent task sets
 - Halt correlation — do kernel halts correspond to genuine task failure?
 - Critic category distribution — success vs failure vs partial vs deferred on real tasks
 - Parameter sensitivity — effect of varying `partial_threshold`, `guard_interval`, `confidence_alpha`
+
+---
+
+**v0.4.0 Completion Summary (Actual Delivered Scope):**
+
+**Delivered:**
+- Trace Analysis Service implemented with strict no-control-authority invariant
+- Adversarial test lane established with seam-level and sequence-level coverage
+- Property-based testing introduced (Hypothesis) with three core invariants:
+  - Confidence boundedness (ADR-025)
+  - HALT absorption
+  - Gate execution exclusivity
+- Mechanical enforcement layer implemented in pragmatic form:
+  - mypy blocking via ADR-046 curated strict profile
+  - CodeQL security-extended enabled
+
+**Not delivered (deferred forward):**
+- Operator-facing trace views and renderers
+- Extended Hypothesis properties beyond core invariants
+- Empirical benchmarking suite
+
+All delivered components preserve deterministic control kernel invariants and authority boundaries.
+
+v0.4.0 establishes the empirical and validation foundation for subsequent behavioural characterisation.
 
 ---
 
@@ -210,7 +240,7 @@ Items deferred across multiple releases without a fixed release target:
 
 ## Contributions
 
-All work must respect the locked invariants in ADR-020–ADR-045.
-See `ARCHITECTURE.md` and `docs/adr/` for the current design baseline.
-Informal design notes are in `docs/design-notes/`.
+All work must respect the locked invariants in ADR-020–ADR-045.  
+See `ARCHITECTURE.md` and `docs/adr/` for the current design baseline.  
+Informal design notes are in `docs/design-notes/`.  
 Reserved boundaries are in `docs/proposals/`.
