@@ -16,6 +16,25 @@ All significant architectural decisions are recorded in the [Architecture Decisi
 
 ---
 
+## Design Baseline vs Implementation Layers
+
+This document describes the **v0.3.0 design baseline**, which defines
+the authoritative architecture and invariants of the Epistemic Control Kernel.
+
+Subsequent releases (e.g. v0.4.0) may introduce validation, enforcement,
+or observability layers (tests, analysis services, static checks) without
+modifying core semantics.
+
+Such layers must:
+- preserve deterministic behavior
+- introduce no new authority surfaces
+- remain strictly non-interfering with control flow
+
+Unless explicitly captured in a new ADR, these additions do not alter
+the design baseline described in this document.
+
+---
+
 ## System Model
 
 At runtime, the ECK executes a deterministic agent loop with explicit separation between:
