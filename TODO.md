@@ -3,7 +3,7 @@
 **Last updated:** 2026-04-09
 
 **Current design baseline:** v0.3.0 (architecture & invariants locked)  
-**Current implementation state:** v0.4.0 complete (validation & enforcement layer; no new ADR baseline)
+**Current implementation + assurance state:** v0.4.0 complete
 
 ---
 
@@ -24,80 +24,44 @@ All v0.3.0 deliverables are complete:
 - **ADR-042** — Propose/authorize/perform execution boundary. `propose_execution`, `authorize_and_perform`, `ProposedAction`, `ExecutionResult`, six formal invariants enforced. TLA⁺ model verified.
 - **ADR-043** — Demonstration policy module. Childcare domain `DemoPolicyGate` proves policy is not reducible to confidence. High-confidence non-EXECUTE outcome on domain-semantic grounds verified under CI.
 - **ADR-044** — Out-of-domain policy module evaluation semantics. Explicit non-EXECUTE required on domain mismatch. No silent passthrough.
-- **ADR-045** — Formal telemetry schema and observability contract. Six canonical event types instrumented at source ownership boundaries. Full per-step trace coherence. `tests/test_telemetry_wiring.py` verifies live end-to-end trace.
+- **ADR-045** — Formal telemetry schema and observability contract. Six canonical event types instrumented at source ownership boundaries. Full per-step trace coherence.
 
-598 tests passing. 98.48% coverage. CI green.
+**Design baseline locked at v0.3.0.** All guarantees derive from ADR-020–ADR-045.
 
 ---
 
-### Deferred from v0.3.0 (Status after v0.4.0)
+### v0.4.0 — Trace Production and Empirical Foundation (Validation & Assurance Layer)
 
-The following v0.3.0 items were deferred to v0.4.0. Their current status is:
+**Status:** Complete
 
-- **Hypothesis / property-based testing** — COMPLETE (v0.4.0 adversarial test lane)
-- **mypy strict** — COMPLETE via ADR-046 curated strict profile (blocking)
-- **CodeQL** — PARTIAL: `python/security-extended` enabled (blocking); `python/quality` deferred due to tooling constraints
-- **icontract** — CLOSED: evaluated and rejected (ADR-046); invariants enforced via typing, tests, and runtime structure
-- **Formal verification of authorize_and_perform** — STILL DEFERRED; appropriate before safety-critical domain deployment
+v0.4.0 adds validation, enforcement, and observability infrastructure **without introducing new load-bearing semantics or changing the control loop**.
+
+**Delivered:**
+- Trace Analysis Service with strict no-control-authority invariant (deep-copy isolation, plain data outputs only)
+- Adversarial deterministic test lane (single-seam and multi-cycle sequence tests)
+- Property-based testing with Hypothesis (three core invariants: confidence boundedness, HALT absorption, gate execution exclusivity)
+- Mechanical enforcement layer (mypy via ADR-046 curated strict profile + CodeQL security-extended blocking)
+
+**Not delivered (deferred):**
+- Operator-facing trace views and renderers
+- Extended Hypothesis properties
+- Empirical benchmarking suite
+
+No new ADRs were created. No control semantics were changed. The design baseline remains v0.3.0.
+
+---
+
+## Deferred from v0.3.0 (Status after v0.4.0)
+
+- **Hypothesis / property-based testing** — COMPLETE in v0.4.0
+- **mypy strict** — COMPLETE via ADR-046 curated profile (blocking)
+- **CodeQL** — PARTIAL: `python/security-extended` enabled (blocking); `python/quality` deferred
+- **icontract** — CLOSED: evaluated and rejected (invariants enforced via typing, tests, and runtime structure)
+- **Formal verification of authorize_and_perform** — STILL DEFERRED
 
 ---
 
 ## Roadmap
-
-### v0.4.0 — Trace Production and Empirical Foundation
-
-**Status:** Complete (scope partially realised; see completion summary)
-
-The first empirical phase. Meaningful characterisation requires the v0.3.0 execution surface and telemetry — both now in place.
-
-**Trace infrastructure (planned scope):**
-- Operator-facing trace views and compact renderers — human-readable per-step summaries, confidence trajectory with policy overlays, reason/rule timelines
-- Read-only trace analysis service — anomaly detection, confidence/pathology pattern flagging, stuck mode and drift spike identification; must not feed back into runtime control
-
-**Adversarial test lane (planned scope):**
-- `tests/adversarial/` — fuzz action proposals, fuzz policy contexts, stress queue and iteration boundaries, inject malformed critic outputs, simulate pathological traces
-- Hypothesis property-based tests for trace-level and sequence-level invariants:
-  - no `step.start` without exactly one `step.end`
-  - no execution when policy mode != EXECUTE
-  - confidence monotonic constraints under failure windows
-  - rejected/deferred → zero delta trajectories
-
-**Mechanical enforcement layer (planned scope):**
-- mypy strict — add to CI initially as non-blocking, then blocking
-- CodeQL — enable on repo
-- icontract — runtime contract enforcement for load-bearing invariants
-
-**Empirical benchmarking (planned scope):**
-- Task success rate with ECK vs without ECK on equivalent task sets
-- Halt correlation — do kernel halts correspond to genuine task failure?
-- Critic category distribution — success vs failure vs partial vs deferred on real tasks
-- Parameter sensitivity — effect of varying `partial_threshold`, `guard_interval`, `confidence_alpha`
-
----
-
-**v0.4.0 Completion Summary (Actual Delivered Scope):**
-
-**Delivered:**
-- Trace Analysis Service implemented with strict no-control-authority invariant
-- Adversarial test lane established with seam-level and sequence-level coverage
-- Property-based testing introduced (Hypothesis) with three core invariants:
-  - Confidence boundedness (ADR-025)
-  - HALT absorption
-  - Gate execution exclusivity
-- Mechanical enforcement layer implemented in pragmatic form:
-  - mypy blocking via ADR-046 curated strict profile
-  - CodeQL security-extended enabled
-
-**Not delivered (deferred forward):**
-- Operator-facing trace views and renderers
-- Extended Hypothesis properties beyond core invariants
-- Empirical benchmarking suite
-
-All delivered components preserve deterministic control kernel invariants and authority boundaries.
-
-v0.4.0 establishes the empirical and validation foundation for subsequent behavioural characterisation.
-
----
 
 ### v0.5.0 — Empirical Behavioural Characterisation
 
