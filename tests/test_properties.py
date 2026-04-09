@@ -8,9 +8,11 @@ Current properties:
     - ConfidenceSignal boundedness (ADR-025)
       For all valid sequences of critic outcomes, every confidence value
       in the resulting trajectory is within [0.0, 1.0].
+    - HALT absorption
+      For all subsequent step() attempts on an agent already in HALT,
+      step() returns False and no execution seam is reached.
 
 Pending (separate commits):
-    - HALT absorption
     - Gate execution exclusivity
 """
 
@@ -19,8 +21,11 @@ from __future__ import annotations
 import pytest
 from hypothesis import given, settings, strategies as st
 from hypothesis.strategies import composite, DrawFn
+from unittest.mock import patch
 
+from eck.agent import ECKAgent
 from eck.confidence import ConfidenceSignal, _KIND_TO_MOVEMENT_CLASS
+from eck.config import ECKConfig, PolicyMode
 from eck.types import (
     ConflictKind,
     ConflictLocus,
@@ -44,6 +49,12 @@ def test_conflict_kind_mapping_covers_full_enum() -> None:
     )
 
 
+# ── Shared stubs ──────────────────────────────────────────────────────────────
+
+def _dummy_llm(prompt: str) -> str:
+    return "NO"
+
+
 # ── Strategies ────────────────────────────────────────────────────────────────
 
 # Non-partial categories — paired with PartialStructure=None
@@ -57,7 +68,6 @@ _ALL_LOCI = list(ConflictLocus)
 def valid_partial_structure(draw: DrawFn) -> PartialStructure:
     """Draw a valid PartialStructure with all required fields."""
     conflict_kind = draw(st.sampled_from(list(ConflictKind)))
-    # Footprint must be non-empty (frozenset of at least one ConflictLocus)
     footprint = draw(
         st.frozensets(st.sampled_from(_ALL_LOCI), min_size=1)
     )
@@ -135,4 +145,55 @@ def test_confidence_always_bounded(
         assert 0.0 <= value <= 1.0, (
             f"Confidence out of bounds at step {i}: {value!r} "
             f"(sequence length {len(sequence)})"
+        )
+
+
+@pytest.mark.property
+@given(
+    task_texts=st.lists(
+        st.text(min_size=1, max_size=50),
+        min_size=1,
+        max_size=10,
+    )
+)
+@settings(max_examples=200)
+def test_halt_is_absorbing(task_texts: list[str]) -> None:
+    """
+    HALT absorption invariant:
+
+        For all subsequent step() attempts on an agent already in HALT,
+        step() returns False and no execution seam is reached.
+
+    The agent is constructed directly in PolicyMode.HALT. This property
+    tests absorption, not acquisition — the path into HALT is covered by
+    the sequence tests.
+
+    task_texts drives the number and content of subsequent step() attempts.
+    Each text is seeded as a task before the corresponding step() call,
+    giving Hypothesis control over how many attempts are made (1–10) and
+    what is in the queue, without affecting the HALT outcome.
+    """
+    import eck.agent as agent_mod
+
+    a = ECKAgent(
+        objective="Test objective",
+        llm_call=_dummy_llm,
+        config=ECKConfig(policy_mode=PolicyMode.HALT),
+    )
+
+    def raise_if_called(*_: object, **__: object) -> object:
+        raise AssertionError("No execution seam should be called in HALT mode")
+
+    for task_text in task_texts:
+        a.seed(task_text)
+        with patch.object(agent_mod, "propose_execution", raise_if_called), \
+             patch.object(agent_mod, "authorize_and_perform", raise_if_called), \
+             patch.object(agent_mod, "generate_prediction", raise_if_called), \
+             patch.object(agent_mod, "critic_evaluate", raise_if_called), \
+             patch.object(agent_mod, "generate_subtasks", raise_if_called):
+            result = a.step()
+
+        assert result is False, (
+            f"step() returned {result!r} in HALT mode "
+            f"(task_text={task_text!r})"
         )
