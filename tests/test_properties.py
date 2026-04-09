@@ -11,9 +11,9 @@ Current properties:
     - HALT absorption
       For all subsequent step() attempts on an agent already in HALT,
       step() returns False and no execution seam is reached.
-
-Pending (separate commits):
     - Gate execution exclusivity
+      For all non-EXECUTE gate decisions, authorize_and_perform is never
+      called, and the gate is evaluated exactly once.
 """
 
 from __future__ import annotations
@@ -21,16 +21,23 @@ from __future__ import annotations
 import pytest
 from hypothesis import given, settings, strategies as st
 from hypothesis.strategies import composite, DrawFn
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from eck.agent import ECKAgent
 from eck.confidence import ConfidenceSignal, _KIND_TO_MOVEMENT_CLASS
 from eck.config import ECKConfig, PolicyMode
+from eck.policy_gate import (
+    ExecutionMode,
+    PolicyCause,
+    PolicyDecision,
+    PolicyGate,
+)
 from eck.types import (
     ConflictKind,
     ConflictLocus,
     CriticOutcome,
     PartialStructure,
+    ProposedAction,
     make_critic_outcome,
 )
 
@@ -55,6 +62,37 @@ def _dummy_llm(prompt: str) -> str:
     return "NO"
 
 
+def _mock_proposal() -> ProposedAction:
+    return ProposedAction(
+        action_type="llm_query",
+        parameters={"prompt": "do the thing"},
+        task_text="task",
+        task_id="test-task-id",
+        provenance_id="test-provenance-id",
+    )
+
+
+def _gate_decision(mode: ExecutionMode) -> PolicyDecision:
+    return PolicyDecision(
+        mode=mode,
+        cause=PolicyCause.CONFIDENCE,
+        reason="property test",
+        rule_id="TEST",
+    )
+
+
+def _snap() -> dict[str, object]:
+    return {
+        "drift_streak": 0,
+        "total_drift_events": 0,
+        "last_error_z": 0.0,
+        "numeric_bias": 0.0,
+        "feasibility_sample_count": 0,
+        "numeric_success_rate": None,
+        "severe": False,
+    }
+
+
 # ── Strategies ────────────────────────────────────────────────────────────────
 
 # Non-partial categories — paired with PartialStructure=None
@@ -62,6 +100,9 @@ _NON_PARTIAL_CATEGORIES = ["success", "failure", "rejected", "deferred"]
 
 # All ConflictLocus members for footprint generation
 _ALL_LOCI = list(ConflictLocus)
+
+# Non-EXECUTE gate modes — the three refusal outcomes
+_NON_EXECUTE_MODES = [ExecutionMode.RETRY, ExecutionMode.DEGRADE, ExecutionMode.HALT]
 
 
 @composite
@@ -197,3 +238,77 @@ def test_halt_is_absorbing(task_texts: list[str]) -> None:
             f"step() returned {result!r} in HALT mode "
             f"(task_text={task_text!r})"
         )
+
+
+@pytest.mark.property
+@given(
+    gate_mode=st.sampled_from(_NON_EXECUTE_MODES),
+)
+@settings(max_examples=100)
+def test_gate_non_execute_never_calls_authorize(
+    gate_mode: ExecutionMode,
+) -> None:
+    """
+    Gate execution exclusivity invariant:
+
+        Given a proposal exists and the gate returns a non-EXECUTE decision,
+        authorize_and_perform is never called and the gate is evaluated
+        exactly once.
+
+    This property is narrowly scoped to the gate-refusal seam. The
+    no-proposal path (a distinct pre-gate short-circuit) is covered
+    deterministically in test_adversarial.py.
+
+    gate_mode is drawn from {RETRY, DEGRADE, HALT} — the three non-EXECUTE
+    outcomes. propose_execution always returns a valid proposal so the gate
+    is always reached. All orthogonal machinery is patched.
+    """
+    import eck.agent as agent_mod
+
+    gate = MagicMock(spec=PolicyGate)
+    gate.evaluate.return_value = _gate_decision(gate_mode)
+
+    a = ECKAgent(
+        objective="Test objective",
+        llm_call=_dummy_llm,
+        config=ECKConfig(),
+        policy_gate=gate,
+    )
+    a.seed("task")
+
+    def raise_if_called(*_: object, **__: object) -> object:
+        raise AssertionError(
+            f"authorize_and_perform must not be called when gate={gate_mode.name}"
+        )
+
+    with patch.object(agent_mod, "propose_execution",
+                      return_value=_mock_proposal()), \
+         patch.object(agent_mod, "authorize_and_perform",
+                      side_effect=raise_if_called), \
+         patch.object(agent_mod, "generate_prediction", return_value="pred"), \
+         patch.object(agent_mod, "critic_evaluate",
+                      return_value=(
+                          make_critic_outcome(
+                              category="rejected",
+                              severity=0.0,
+                              feedback="rejected",
+                          ),
+                          None,
+                      )), \
+         patch.object(agent_mod, "generate_subtasks", return_value=[]), \
+         patch.object(a.drift, "get_policy_mode",
+                      return_value=PolicyMode.NORMAL), \
+         patch.object(a.drift, "record_error", return_value=False), \
+         patch.object(a.drift, "record_feasibility"), \
+         patch.object(a.drift, "snapshot", return_value=_snap()):
+        a.step()
+
+    # Gate must have been evaluated exactly once
+    gate.evaluate.assert_called_once()
+
+    # Gate must not have returned EXECUTE
+    decision = gate.evaluate.return_value
+    assert decision.mode is not ExecutionMode.EXECUTE, (
+        f"Gate returned EXECUTE in a non-EXECUTE property test — "
+        f"strategy is broken"
+    )
