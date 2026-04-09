@@ -6,33 +6,34 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 keywords = [
-    "epistemic-control",
-    "agent",
-    "reliability",
-    "drift-detection",
-    "self-regulation",
-    "autonomous-systems",
+  "epistemic-control",
+  "agent",
+  "reliability",
+  "drift-detection",
+  "self-regulation",
+  "autonomous-systems",
 ]
 authors = [
-    {name = "robotransit"}
+  {name = "robotransit"}
 ]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
 ]
 
 [project.optional-dependencies]
 openai = [
-    "openai>=1.0",
+  "openai>=1.0",
 ]
 embeddings = [
-    "sentence-transformers",
+  "sentence-transformers",
 ]
 test = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-    "mypy",
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "mypy",
+  "hypothesis>=6.0",
 ]
 
 [build-system]
@@ -53,20 +54,20 @@ testpaths = ["tests"]
 # Core markers: blocking, deterministic, stdlib-only
 # Capability marker: non-blocking, may use optional extras
 markers = [
-    "core: deterministic invariant tests (blocking)",
-    "guardrail: ADR-033 no-leakage and authority boundary tests (blocking)",
-    "memory: memory retrieval toggle and equivalence tests (blocking)",
-    "critic: critic parsing, pessimistic failure, severity tests (blocking)",
-    "policy: policy mode irreversibility and gate contract tests (blocking)",
-    "queue: TaskQueue deterministic ordering and overflow tests (blocking)",
-    "confidence: confidence signal EWMA and invariant tests (blocking)",
-    "similarity: similarity retrieval core and fallback tests (blocking)",
-    "capability: optional extras and integration tests (non-blocking)",
+  "core: deterministic invariant tests (blocking)",
+  "guardrail: ADR-033 no-leakage and authority boundary tests (blocking)",
+  "memory: memory retrieval toggle and equivalence tests (blocking)",
+  "critic: critic parsing, pessimistic failure, severity tests (blocking)",
+  "policy: policy mode irreversibility and gate contract tests (blocking)",
+  "queue: TaskQueue deterministic ordering and overflow tests (blocking)",
+  "confidence: confidence signal EWMA and invariant tests (blocking)",
+  "similarity: similarity retrieval core and fallback tests (blocking)",
+  "capability: optional extras and integration tests (non-blocking)",
+  "property: property-based tests using Hypothesis (blocking)",
 ]
 
 [tool.mypy]
 python_version = "3.10"
-
 # ADR-046 curated profile (see ADR-046 for rationale and excluded flags)
 disallow_untyped_defs = true
 disallow_any_generics = true
