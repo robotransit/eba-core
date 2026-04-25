@@ -1,11 +1,16 @@
 # Epistemic Control Kernel (ECK)
 
-Autonomous agents are taking irreversible actions without deterministic
-authorization boundaries. Frontier models demonstrate that high capability
-does not guarantee reliable calibration — the top-ranked model on current
-benchmarks reports an 86% hallucination rate on knowledge tasks. A
-confident wrong answer that drives an irreversible action is a different
-failure mode from a confident wrong answer that a human can correct.
+Calibration is not guaranteed to track capability. In practice, it often
+lags — and even when present, it cannot be relied on as a binding
+mechanism for controlling execution. A model may be uncertain and still
+propose and execute actions. Confidence signals are epistemic inputs, not
+behavioural constraints.
+
+The top-ranked model on current benchmarks reports an 86% hallucination
+rate on knowledge tasks. Capability improvements do not necessarily produce
+corresponding improvements in calibration. A confident wrong answer that
+drives an irreversible action is a different failure mode from a confident
+wrong answer that a human can correct.
 
 **ECK is a proposed architecture for systems where agentic execution
 authority must be bounded by explicit policy, calibrated epistemic
@@ -15,24 +20,38 @@ signals, and irreversible-action safeguards.**
 
 ## The Problem ECK Addresses
 
-Without an explicit authorization boundary, an LLM agent's confidence
-signal and its execution permission are the same thing. The model assesses
-its own proposal, finds it acceptable, and acts. Nothing stands between
-the proposal and the action except the model's self-assessment.
+There are two distinct gaps in current agentic deployments.
+
+The first: the gap between what agentic systems can do and what they
+reliably know they should do. Without an explicit authorization boundary,
+an LLM agent's confidence signal and its execution permission are the same
+thing. The model assesses its own proposal, finds it acceptable, and acts.
+Nothing stands between the proposal and the action except the model's
+self-assessment.
+
+The second: the gap between what agentic systems can do and what they
+should be used for. Deployment judgment — knowing where agentic systems
+are and are not appropriate — has not kept pace with capability.
+
+Both gaps resolve to the same requirement. Any binding constraint on
+agentic systems — whether from internal architecture, deployment judgment,
+regulatory requirement, or institutional governance — requires a
+deterministic enforcement mechanism at the execution boundary. Without it,
+constraints are advisory not binding. "Must not" becomes "should not."
 
 This structural condition is consistent with documented incidents:
 autonomous agents purchasing items without consent, deleting drives,
-moving files into unrecoverable states, and dropping databases — not because the
-models were unsophisticated, but because no deterministic check stood
-between proposal and execution.
+moving files into unrecoverable states, and dropping databases — not
+because the models were unsophisticated, but because no deterministic
+check stood between proposal and execution.
 
 ECK addresses this by separating three things that current agent
 architectures conflate:
 
 - **What the LLM proposes** — advisory only, never authoritative
 - **What the epistemic state of the system permits** — tracked as a
-  calibrated confidence signal (imperfect but structured) over sequences of outcomes, not
-  self-reported per-call
+  calibrated confidence signal (imperfect but structured) over sequences
+  of outcomes, not self-reported per-call
 - **What policy authorizes** — determined by a deterministic gate whose
   rules are explicit, testable, and domain-specific
 
@@ -74,7 +93,12 @@ policy decision.
 
 ## Who ECK Is For
 
-ECK is relevant when three conditions are present:
+ECK is the enforcement mechanism for binding constraints on agentic
+systems. It is relevant wherever a constraint must be enforced rather than
+merely advised — whether that constraint comes from internal architecture,
+deployment policy, regulatory requirement, or institutional governance.
+
+Three conditions make ECK's overhead specifically justified:
 
 1. **The domain is irreversibility-sensitive.** Some actions cannot be
    undone and the cost of a wrong execution is not recoverable by
@@ -93,7 +117,8 @@ ECK is relevant when three conditions are present:
 
 These conditions compound. ECK's overhead is justified when the expected
 cost of a silent policy failure — factoring in irreversibility,
-compositional complexity, and horizon length — exceeds the cost of implementing and maintaining the control architecture.
+compositional complexity, and horizon length — exceeds the cost of
+implementing and maintaining the control architecture.
 
 If your system does not authorize actions with real-world consequences,
 ECK is likely unnecessary.
@@ -184,17 +209,17 @@ structurally impossible under its invariants.
 
 ## Honest Limitations
 
-ECK is a well-constructed answer to a real problem. It is not a validated
-answer. The necessity case rests on:
+ECK is, in our view, a well-constructed answer to a real problem. It is
+not a validated answer. The necessity case rests on:
 
 - Documented incidents of autonomous agents causing irreversible harm
   without deterministic authorization boundaries
 - Convergent engineering evidence: organisations building reliable agentic
   systems independently converge on the same propose → gate → authorize
   pattern
-- The structural argument that capability and calibration are not coupled,
-  and that a system relying on model self-assessment alone is structurally
-  exposed
+- The structural argument that calibration cannot be relied on as a
+  binding control mechanism, and that a system relying on model
+  self-assessment alone is structurally exposed
 
 What ECK has not yet demonstrated is that its specific architecture
 produces materially better outcomes than a simpler deterministic check in
