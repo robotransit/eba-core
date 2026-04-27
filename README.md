@@ -189,6 +189,57 @@ To supply a domain-specific policy gate:
         policy_gate=MyPolicyGate(),
     )
 
+### Writing a minimal policy gate
+
+A policy gate is a pure function — deterministic, side-effect free, no
+hidden inputs, no mutable state. Inheritance is not required; matching
+the interface is sufficient (`PolicyGate` is a structural Protocol).
+
+    from eck.policy_gate import PolicyDecision, PolicyCause, ExecutionMode, PolicyContext
+
+    class MyPolicyGate:
+        def evaluate(self, proposed_action, confidence, context, **kwargs):
+
+            # Always halt on active failure window
+            if context.failure_window_active:
+                return PolicyDecision(
+                    mode=ExecutionMode.HALT,
+                    cause=PolicyCause.FAILURE_WINDOW,
+                    reason="Failure window active — halting until reviewed",
+                    rule_id="MY_001",
+                )
+
+            # Refuse irreversible actions below confidence threshold
+            if (
+                proposed_action.action_type in ("db_write", "file_delete")
+                and confidence < 0.85
+            ):
+                return PolicyDecision(
+                    mode=ExecutionMode.RETRY,
+                    cause=PolicyCause.SAFETY,
+                    reason=f"Irreversible action requires confidence >= 0.85, got {confidence:.2f}",
+                    rule_id="MY_002",
+                )
+
+            return PolicyDecision(
+                mode=ExecutionMode.EXECUTE,
+                cause=PolicyCause.DEFAULT,
+                reason="Policy conditions satisfied",
+                rule_id="MY_003",
+            )
+
+**Key inputs:** `confidence` is the system's smoothed epistemic signal
+`[0.0, 1.0]` — not the model's self-reported confidence.
+`context.failure_window_active` is True after a hard failure; treat it
+as a strong signal to refuse execution. `proposed_action.action_type`
+identifies the category of action proposed.
+
+**The gate must not:** read from external systems, maintain state between
+calls, use randomness, or call the LLM. The gate must be deterministic
+and side-effect free: identical inputs must produce identical decisions.
+
+Full field reference and testing guide: `docs/policy-gates.md`
+
 ---
 
 ## What ECK Is Not
