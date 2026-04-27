@@ -306,6 +306,27 @@ If something is not visible in code or tests, it does not exist.
 
 ---
 
+## Related Work
+
+Recent work has independently argued for deterministic architectural
+boundaries in agentic systems.
+
+- **Trustworthy Agentic AI Requires Deterministic Architectural Boundaries**
+  (Bhattarai and Vu, 2026 — [arXiv:2602.09947](https://arxiv.org/abs/2602.09947))
+
+This line of work introduces action governance via a reference-monitor
+architecture and a finite action calculus. It aligns with the core ECK
+principle that execution authority must be bounded by explicit,
+deterministic enforcement rather than relying solely on probabilistic
+model behaviour.
+
+ECK differs in scope and formulation. It is a minimal microkernel-style
+architecture with a strictly defined control boundary (the policy gate)
+and explicit invariants governing confidence, policy gate behaviour, and
+execution semantics.
+
+---
+
 ## License
 
 MIT License — see LICENSE for details.
