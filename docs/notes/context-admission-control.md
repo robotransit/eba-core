@@ -45,6 +45,15 @@ as sources of corrective signal. However, they do not explicitly model
 the effect of errors that re-enter the system as context. This omission
 leads to an underestimation of the impact of contamination.
 
+A related failure mode appears in aligned language models: Liu et al.
+(2026) show that finetuning on a routine writing task can reactivate
+verbatim memorization of copyrighted text across three frontier models,
+bypassing RLHF, output filters, and system prompt constraints. This
+demonstrates that soft alignment constraints are not stable under
+feedback transformations — the distribution of inputs and objectives
+the model is trained under can change in ways that unlock behaviors
+the alignment was designed to suppress.
+
 ---
 
 ## 2. Separation of Roles: Signal vs Distribution
@@ -159,7 +168,40 @@ Examples include:
 
 ---
 
-## 6. Effect on System Dynamics
+## 6. Sketch of Formal Model
+
+Let the total system operator decompose as:
+
+$$\mathbf{A} = \mathbf{A}_{\text{model}} + \mathbf{A}_{\text{feedback}}$$
+
+where **A**_model captures the model's internal dynamics (parameter
+updates via the gradient channel) and **A**_feedback captures the
+environmental feedback path (outputs re-entering as context).
+
+Let γ denote the fraction of outputs blocked by the admission policy
+(with γ = 0 admitting all outputs and γ → 1 blocking all outputs).
+The effect on the feedback term is:
+
+$$\mathbf{A}_{\text{feedback}} \;\rightarrow\; (1 - \gamma)\,\mathbf{A}_{\text{feedback}}$$ The resulting system operator under CAC is:
+
+$$\mathbf{A}_{\text{CAC}} = \mathbf{A}_{\text{model}} + (1 - \gamma)\,\mathbf{A}_{\text{feedback}}$$
+
+By standard results in control theory, reducing the magnitude of the
+feedback term reduces the spectral radius of the system operator:
+
+$$\rho(\mathbf{A}_{\text{CAC}}) < \rho(\mathbf{A}) \quad \text{when } \gamma > 0$$
+
+**Connection to Feng et al. (2024).** The sharp phase transition observed
+by Feng et al. — below a corruption threshold p* the downstream model
+achieves optimal accuracy, above it accuracy collapses — corresponds in
+this framework to the boundary where ρ(**A**) crosses 1. The threshold
+p* is the value of γ at which ρ(**A**_CAC) = 1: the minimal admission
+control required to keep the system stable. Verification, in their
+empirical setting, is the mechanism that implements γ > 0.
+
+---
+
+## 7. Effect on System Dynamics
 
 CAC attenuates the environmental feedback path by blocking contaminated
 outputs from re-entering the context distribution.
@@ -175,13 +217,14 @@ when the admission policy removes a non-trivial portion of erroneous
 outputs.
 
 Recent work shows that verification introduces a sharp phase transition
-in recursive training systems [Feng et al., 2024]; CAC provides a
-control-theoretic interpretation of this effect as feedback attenuation
-reducing the system's effective gain.
+in recursive training systems [Feng et al., 2024]; the formal model in
+Section 6 provides a control-theoretic interpretation of this effect as
+feedback attenuation reducing the system's effective gain below the
+instability threshold.
 
 ---
 
-## 7. When CAC Is Advantageous
+## 8. When CAC Is Advantageous
 
 CAC is most effective under the following conditions:
 
@@ -196,9 +239,17 @@ correctness is low relative to the cost of contamination.
 In these regimes, the cost of contamination is not limited to gradient
 bias. It becomes an environmental effect that compounds over time.
 
+The Liu et al. (2026) result extends the applicability of this condition:
+soft alignment constraints — RLHF, system prompts, output filters — are
+themselves susceptible to feedback transformation. Finetuning changes
+the distribution of inputs and objectives, and can reactivate behaviors
+that alignment suppressed. CAC addresses this by controlling what enters
+the feedback loop, rather than relying on behavior shaping that may not
+survive distribution shift.
+
 ---
 
-## 8. Relation to Existing Training Paradigms
+## 9. Relation to Existing Training Paradigms
 
 Standard training implicitly assumes an open-loop system in which errors
 influence learning but do not alter the future input distribution beyond
@@ -210,7 +261,7 @@ failure influences adaptation without being reproduced as behavior.
 
 ---
 
-## 9. Limitations
+## 10. Limitations
 
 CAC does not apply universally and introduces tradeoffs:
 
@@ -225,16 +276,21 @@ These constraints define the domain of applicability.
 
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 Recursive training systems introduce an environmental feedback channel
 that is not captured by standard open-loop analyses. This channel
 increases the system's effective gain and can lead to instability when
-contaminated outputs are reused as context.
+contaminated outputs are reused as context. The same mechanism explains
+why soft alignment constraints are not stable under finetuning: changing
+the feedback distribution can reactivate suppressed behaviors regardless
+of prior alignment.
 
 Context Admission Control provides a structural mechanism to attenuate
-this feedback path. When verification is cheap and sufficiently reliable,
-CAC reduces the system's effective gain and improves stability.
+this feedback path. The formal decomposition **A** = **A**_model +
+**A**_feedback makes explicit that CAC reduces ρ by attenuating
+**A**_feedback, and connects the empirically observed phase transition
+in Feng et al. (2024) to the stability boundary ρ = 1.
 
 The contribution is not new mathematics, but the application of
 closed-loop stability analysis to recursive learning systems.
@@ -259,3 +315,7 @@ makes models forget. arXiv:2305.17493.
 Feng, Y., Dohmatob, E., Yang, P., Charton, F., and Kempe, J. (2024).
 Beyond model collapse: Scaling up with synthesized data requires
 verification. arXiv:2406.07515.
+
+Liu, X., Mireshghallah, N., Ginsburg, J. C., and Chakrabarty, T. (2026).
+Alignment whack-a-mole: Finetuning activates verbatim recall of
+copyrighted books in large language models. arXiv:2603.20957.
