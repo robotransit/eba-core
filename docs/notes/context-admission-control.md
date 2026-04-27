@@ -15,14 +15,15 @@ In autoregressive and agentic learning systems, model outputs can re-enter
 future context through synthetic data generation, reasoning traces, tool-use
 logs, or self-play loops. This creates a closed-loop system in which errors
 propagate not only through gradient-based updates but also through
-environmental feedback. We argue that standard training formulations
-implicitly treat the system as open-loop and therefore underestimate the
-impact of contamination. We introduce **Context Admission Control (CAC)**
-as a structural mechanism that restricts which generated outputs are
-permitted to re-enter the context distribution. Using a control-theoretic
-framing, we show that CAC attenuates the environmental feedback path,
-reducing the system's effective gain and improving stability when
-verification is cheap and sufficiently reliable.
+environmental feedback. Prior work has shown that recursive training on
+model-generated data can lead to distributional collapse [Shumailov et al.,
+2023]. We argue that standard training formulations implicitly treat the
+system as open-loop and therefore underestimate the impact of contamination.
+We introduce **Context Admission Control (CAC)** as a structural mechanism
+that restricts which generated outputs are permitted to re-enter the context
+distribution. Using a control-theoretic framing, we show that CAC attenuates
+the environmental feedback path, reducing the system's effective gain and
+improving stability when verification is cheap and sufficiently reliable.
 
 ---
 
@@ -173,6 +174,11 @@ $$\rho_{\text{with CAC}} < \rho_{\text{without CAC}}$$
 when the admission policy removes a non-trivial portion of erroneous
 outputs.
 
+Recent work shows that verification introduces a sharp phase transition
+in recursive training systems [Feng et al., 2024]; CAC provides a
+control-theoretic interpretation of this effect as feedback attenuation
+reducing the system's effective gain.
+
 ---
 
 ## 7. When CAC Is Advantageous
@@ -237,7 +243,19 @@ closed-loop stability analysis to recursive learning systems.
 
 ## One-line summary
 
-In recursive training systems, outputs that re-enter future context create
+In recursive training systems, outputs that re-enter future context form
 a closed-loop feedback path; context admission control attenuates this
 path, reducing the system's effective gain and restoring stability when
 cheap, high-coverage verification is available.
+
+---
+
+## References
+
+Shumailov, I., Shumaylov, Z., Zhao, Y., Gal, Y., Papernot, N., and
+Anderson, R. (2023). The curse of recursion: Training on generated data
+makes models forget. arXiv:2305.17493.
+
+Feng, Y., Dohmatob, E., Yang, P., Charton, F., and Kempe, J. (2024).
+Beyond model collapse: Scaling up with synthesized data requires
+verification. arXiv:2406.07515.
