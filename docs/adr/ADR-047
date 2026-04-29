@@ -1,0 +1,597 @@
+# ADR-047: Gate-Authored Observation Seam
+
+**Status:** Proposed (Target: v0.4.x)
+
+---
+
+## Objective
+
+Restore strict purity of `PolicyGate.evaluate()` by removing all telemetry
+emission from inside the gate, while preserving — and strengthening — the
+guarantee that every policy decision produces exactly one corresponding
+telemetry record at the kernel seam.
+
+This ADR establishes:
+
+* the **gate-authored observation seam** (the post-decision kernel call site
+  at which telemetry is emitted)
+* the requirement that the gate **author** structured observational data as
+  part of its returned `PolicyDecision`, but **emit nothing**
+* the requirement that the kernel **emit** that data exactly once,
+  synchronously, before enforcing the decision
+* the distinction between **mandatory emission** (structural, by code shape)
+  and **best-effort delivery** (operational, sink-dependent)
+* the structural immutability requirement for the observation payload
+* the migration path from the current in-gate `emit_event` pattern
+* the relationship to ADR-042 (execution boundary), ADR-037 (telemetry
+  schema), and the no-control-authority invariant of the trace analysis
+  surface
+
+This ADR closes a residual contract violation in the v0.3.0 implementation:
+`DefaultPolicyGate.evaluate()` calls `emit_event(...)` despite the gate
+contract asserting determinism, side-effect freedom, and absence of external
+calls.
+
+---
+
+## Context
+
+### Current State (Non-Compliant)
+
+`eck/policy_gate.py` declares the gate contract as pure:
+
+> All implementations MUST behave as a pure, referentially transparent
+> function of `(proposed_action, confidence, context)`.
+> This implies: no internal mutable state; no randomness; no dependence on
+> time or external environment; no hidden inputs or implicit context;
+> **no side effects (no I/O, no external calls)**.
+
+The current `DefaultPolicyGate.evaluate()` implementation, however, calls
+`emit_event("policy.evaluate", ...)` from inside an inner `_emit` helper
+applied to every return path (gated on `trace_id`, `step_id`, and
+`deterministic_nonce` all being supplied). The codepath is observational
+and the events are asserted not to influence control flow, but the
+contract text and the implementation are out of alignment:
+
+* the docstring asserts side-effect freedom
+* the implementation performs I/O via the telemetry sink
+* the gap is closed only by trust in the caller and the sink, not by
+  structure
+
+This is fixable without weakening the contract.
+
+---
+
+### Two Options Considered and Rejected
+
+**Option A — emit inside the gate (status quo).**
+Pros: emission cannot be forgotten by the caller; ruling and record are
+constructed at the same site. Cons: the gate is not literally pure;
+purity must be downgraded to "behaviourally pure"; the policy
+implementation becomes entangled with the telemetry surface; a sink
+failure inside `evaluate()` can propagate as an exception out of a
+function the contract says is side-effect free.
+
+**Option B — emit immediately after `evaluate()` returns.**
+Pros: gate regains literal purity. Cons: introduces a gap between
+ruling construction and recording; the kernel must reconstruct the
+observation payload from inputs the gate already saw, creating a second
+derivation site that may drift from the first; "the caller must
+remember to emit" becomes a trust-based invariant rather than a
+structural one.
+
+Neither is ECK-clean. Option A weakens purity. Option B introduces a
+trust gap and a reconstruction risk.
+
+---
+
+### Selected Option — Gate-Authored, Kernel-Emitted
+
+The gate **authors** the observation payload as a frozen field of its
+returned `PolicyDecision`. The kernel **emits** that payload, exactly
+once, synchronously, at the post-decision seam, before enforcing the
+decision.
+
+This collapses Option B's atomicity gap into structural identity with
+Option A — there is no second derivation site, because the gate's view
+*is* the recorded view — without reintroducing impurity, because
+returning a frozen data structure is not a side effect.
+
+The seam itself is named:
+
+> **Gate-Authored Observation Seam**
+
+Synonyms accepted in code comments and tests: *post-decision observation
+seam*, *kernel observation seam*. The named-seam convention follows
+ADR-042's *propose/authorize/perform* boundary naming.
+
+---
+
+### The Two-Property Distinction
+
+The previous formulation conflated two properties that must be split.
+
+**Emission is mandatory** — at the structural level. The kernel call
+site is shaped so that a decision cannot be enforced without first
+invoking the emit call. This is enforced by code shape, type signature,
+and test, not by runtime detection. A reordering or removal of the emit
+call is a code change that must fail typecheck, fail test, or be
+visible in review.
+
+**Delivery is best-effort** — at the operational level. The telemetry
+sink may be slow, full, async-buffered, network-degraded, or absent.
+Sink failure MUST NOT raise into the kernel's control path, MUST NOT
+alter the returned decision, MUST NOT alter `PolicyMode`, MUST NOT
+alter the execution outcome, and MUST NOT alter control flow.
+
+Conflating these — either making delivery mandatory, or making emission
+optional — violates one of the two ECK invariants this ADR is built to
+preserve:
+
+* mandatory delivery would give telemetry a control side-channel (a
+  misconfigured sink could halt the kernel)
+* optional emission would give the caller a way to silently drop
+  decisions from the audit trail
+
+---
+
+## Decision
+
+### 1. PolicyDecision Carries Gate-Authored Observation
+
+`PolicyDecision` is extended with a frozen `observation` field
+authored by the gate at decision time:
+
+```
+@dataclass(frozen=True)
+class PolicyDecision:
+    mode: ExecutionMode
+    cause: PolicyCause
+    reason: str
+    rule_id: str
+    observation: Mapping[str, object]   # frozen, gate-authored
+```
+
+The `observation` field MUST:
+
+* be constructed by the gate inside `evaluate()` from inputs and ruling
+  state the gate already had access to
+* contain no callable objects, no mutable references to caller-owned
+  data, and no objects that retain references to the gate's internal
+  state
+* be **structurally immutable** at the boundary — not merely
+  reference-frozen by the dataclass
+
+Acceptable structural-immutability mechanisms:
+
+* `types.MappingProxyType(dict_payload)` constructed inside `evaluate()`
+* a purpose-built `FrozenMapping` helper that rejects `__setitem__`,
+  `__delitem__`, and `update`
+* an immutable `TypedDict`-like structure with a runtime guard
+
+`@dataclass(frozen=True)` alone is **not sufficient** — it freezes the
+reference to the mapping, not its contents. A plain `dict` placed in a
+frozen dataclass field can still be mutated by any holder of the
+reference between gate return and kernel emission.
+
+The observation payload SHOULD include the fields currently emitted by
+`DefaultPolicyGate._emit`: `mode`, `cause`, `rule_id`, `reason`,
+`confidence`, `failure_window_active`, `environment`, `safety_level`,
+and (when present on the proposed action) `action_type`. Schema is
+governed by ADR-037.
+
+---
+
+### 2. PolicyGate Contract — Strict Purity Restored
+
+The `PolicyGate` Protocol docstring is restored to its strict form
+without qualification. `evaluate()` MUST be:
+
+* deterministic
+* referentially transparent in `(proposed_action, confidence, context)`
+* free of internal mutable state
+* free of randomness
+* independent of time and external environment
+* **free of all side effects, including telemetry emission**
+
+The gate authors observational data; it does not emit it.
+
+`PolicyGate.evaluate()` MUST NOT:
+
+* call `emit_event` or any telemetry sink directly
+* perform I/O of any kind
+* accept or use `trace_id`, `step_id`, or `deterministic_nonce`
+  parameters — these are kernel concerns and have no place in the gate
+  signature
+
+The current `evaluate(...)` keyword-only telemetry parameters MUST be
+removed. Their presence in v0.3.0 is the structural evidence of the
+contract violation this ADR closes.
+
+---
+
+### 3. Kernel Seam — Mandatory Synchronous Emission
+
+The kernel MUST invoke telemetry emission exactly once per gate
+evaluation, synchronously, in-thread, at the post-decision seam,
+before any code path that enforces, branches on, or persists the
+decision.
+
+The kernel MUST invoke emission via a single-expression helper that
+returns the `PolicyDecision` after performing emission. The decision
+MUST NOT be accessible to the caller before emission has been invoked.
+The required wrapped call shape narrows the trust gap to a
+CI-detectable footprint. Enforcement of the seam is supplied by static
+checks (Test 13) and runtime tests (Tests 4, 5, and 11), not by call
+shape alone.
+
+Required helper signature:
+
+```
+def emit_policy_event(
+    decision: PolicyDecision,
+    *,
+    trace_id: str,
+    step_id: str,
+    deterministic_nonce: int,
+) -> PolicyDecision:
+    """Emit policy.evaluate telemetry and return the decision.
+
+    The returned decision is referentially identical to the argument.
+    Sink failures are swallowed per §4 — this function never raises
+    into the kernel's control path.
+    """
+    ...
+    return decision
+```
+
+Required call shape at the kernel seam:
+
+```
+decision = emit_policy_event(
+    self._policy_gate.evaluate(
+        proposed_action=proposed,
+        confidence=self._confidence.get_value(),
+        context=policy_context,
+    ),
+    trace_id=self._trace_id,
+    step_id=step_id,
+    deterministic_nonce=step_nonce,
+)
+# only after this point may the decision be enforced
+if decision.mode is ExecutionMode.EXECUTE:
+    ...
+```
+
+This shape removes the ordinary separated-call trust gap. The binding
+of `decision` cannot occur before `emit_policy_event` returns, and
+compliant implementations of `emit_policy_event` must invoke emission
+before returning. Reordering or skipping emission is structurally
+non-compliant and must be detectable in CI. Enforcement is provided
+by static and runtime tests (Tests 4, 5, 11, 13), not by impossibility.
+
+`emit_policy_event` MUST:
+
+* read `decision.observation` directly — perform no reconstruction
+* attach `trace_id`, `step_id`, `deterministic_nonce`, `severity`,
+  and `source="policy_gate"` from the kernel's call context
+* invoke the telemetry sink synchronously, in-thread
+* swallow sink-side failures and convert them into an internal log
+  entry at ERROR severity (see §4)
+* return the `PolicyDecision` referentially unchanged
+
+`emit_policy_event` MUST NOT:
+
+* mutate the decision or its observation field
+* perform reconstruction or enrichment of the observation payload
+  beyond attaching the kernel-context fields above
+* re-raise sink exceptions
+* be conditional on runtime state other than the decision argument
+  itself
+
+Calling `gate.evaluate(...)` outside an `emit_policy_event(...)`
+wrapping is non-compliant (see Compliance, §Test Requirements 13).
+
+---
+
+### 4. Delivery Failure — Non-Authoritative
+
+Telemetry sink failure MUST NOT affect:
+
+* the returned `PolicyDecision`
+* the current or future `PolicyMode`
+* the `ExecutionResult` for this cycle
+* the confidence signal
+* the drift monitor
+* control flow of any kind
+
+When the sink raises, `emit_policy_event` MUST:
+
+* catch the exception locally
+* emit a structured ERROR-level log entry to the kernel logger naming
+  the failed event, the `rule_id`, and the exception type (no payload
+  contents — payload may itself be the cause of the failure)
+* return normally to the caller
+* NOT re-raise
+
+This is the non-control-authority invariant for telemetry, made
+operationally precise. The trace analyzer's "strict no-control-authority"
+rule (existing) and this delivery-failure rule (new) together form the
+total contract: **telemetry observes; it never decides.**
+
+---
+
+### 5. Replay and Determinism
+
+`ConfidenceSignal.replay()` already suppresses telemetry via the
+absence of telemetry parameters on `update()`. The same pattern MUST
+apply to gate-decision replay: a `replay_decision(decision)` helper, if
+introduced, MUST NOT invoke `emit_policy_event`. Replay reconstructs
+trajectories, not audit records.
+
+Because the observation payload is constructed inside `evaluate()` from
+the gate's actual inputs, identical inputs produce identical
+`PolicyDecision` values including identical `observation` fields. This
+preserves the existing replay determinism guarantee at strictly higher
+fidelity than the v0.3.0 implementation, in which the kernel would have
+needed to reconstruct the payload from inputs the gate had already
+processed.
+
+---
+
+### 6. Migration
+
+The migration is performed in three locked steps. Each step is a
+single PR. Each is independently testable.
+
+**Step 1 — Extend `PolicyDecision` with `observation`.**
+Add the frozen field. Implement structural immutability. Update
+`DefaultPolicyGate` and `DemoPolicyGate` to populate `observation` on
+every return path with the same fields they currently pass to
+`emit_event`. `evaluate()` continues to call `emit_event` for the
+duration of this step. Existing tests pass unchanged. New tests
+assert structural immutability and field presence.
+
+**Step 2 — Introduce kernel-side `emit_policy_event` and call it at
+the seam.** The kernel emits via the new helper *and* the gate
+continues to emit via the old path. This produces duplicate events
+and is intentional — it allows a parity test (Step 2 acceptance) to
+confirm the kernel-side payload matches the gate-side payload byte-
+for-byte across a representative trace corpus before the gate-side
+emission is removed.
+
+**Step 3 — Remove `emit_event` and the telemetry keyword arguments
+from `PolicyGate.evaluate()` signatures.** Restore the strict purity
+docstring. Delete the inner `_emit` helper from `DefaultPolicyGate`.
+Update the Protocol signature to drop `trace_id`, `step_id`,
+`deterministic_nonce`. The gate is now literally pure.
+
+Each step is reversible up to the point of Step 3. Step 3 is the lock.
+
+---
+
+## Non-Goals
+
+This ADR does NOT define:
+
+* the telemetry schema itself (governed by ADR-037)
+* the trace analyzer's consumption of `policy.evaluate` events
+* the inner structure of `observation` beyond the structural-immutability
+  requirement and the recommended field set
+* the analogous treatment for `confidence.update` telemetry — the
+  confidence signal has different concerns (cycle-id ownership,
+  failure-window state) and is addressed separately if needed
+* any changes to `ExecutionMode`, `PolicyMode`, `PolicyContext`, or
+  the propose/authorize/perform boundary established in ADR-042
+
+---
+
+## Consequences
+
+### Positive
+
+* `PolicyGate.evaluate()` becomes literally pure — the docstring and
+  the implementation align without qualification
+* the kernel becomes the sole emitter of telemetry, consistent with
+  the "kernel as enforcement seam" principle of ADR-042
+* the gate's view and the recorded view are structurally identical —
+  no reconstruction site, no drift
+* the non-control-authority invariant for telemetry is now operationally
+  enforceable: a sink failure cannot halt or perturb the kernel
+* reviewers can detect emission-skip or emission-reorder bugs at PR
+  time by inspecting the kernel seam
+* `PolicyGate` implementations no longer need to know about telemetry
+  parameters — a domain-specific gate author writes pure logic only
+
+### Trade-offs
+
+* `PolicyDecision` grows by one field; serialisation consumers must
+  handle `observation` (or explicitly ignore it)
+* the migration is three PRs, not one — Step 2's intentional duplicate
+  emission requires a parity-test corpus
+* gate authors must construct an immutable mapping inside `evaluate()`,
+  which is one extra line per return path — this is the cost of
+  preserving structural immutability rather than reference-only
+  immutability
+
+---
+
+## Test Requirements
+
+### 1. Gate Purity — Static
+
+* a static check (mypy plugin, AST scan, or test) MUST verify that no
+  module under `eck/` imports `emit_event` in the same scope as a
+  `PolicyGate` subclass or implementer
+
+→ violation is a non-compliance signal
+
+### 2. Gate Purity — Runtime
+
+* snapshot relevant module-level and global state before
+  `gate.evaluate()`
+* call `gate.evaluate()` with arbitrary valid inputs
+* assert no module state changed; assert no telemetry sink was invoked
+
+→ any change is a non-compliance signal
+
+### 3. Observation Structural Immutability
+
+* obtain a `PolicyDecision` from `DefaultPolicyGate.evaluate()`
+* attempt `decision.observation["mode"] = "EXECUTE"`
+* attempt `decision.observation.update({"x": 1})`
+* attempt `del decision.observation["mode"]`
+
+→ each MUST raise (`TypeError` for `MappingProxyType`, equivalent for
+alternative implementations)
+
+### 4. Emission Completeness — 1:1 Mapping
+
+* invoke `gate.evaluate()` N times via the kernel seam
+* count `emit_policy_event` invocations
+
+→ MUST equal N exactly
+
+### 5. Emission Ordering — Pre-Enforcement
+
+* instrument `emit_policy_event` and the enforcement branch
+* run the kernel cycle
+
+→ for every cycle, the emit invocation MUST precede any branch on
+`decision.mode` or any call to `authorize_and_perform`
+
+### 6. Delivery Failure Is Non-Authoritative
+
+* inject a telemetry sink that raises on every call
+* run the kernel through a full cycle including a successful execution
+  path
+
+→ the cycle MUST complete normally
+→ `PolicyDecision` MUST be unchanged
+→ `PolicyMode` MUST be unchanged
+→ `ExecutionResult` MUST be unchanged
+→ control flow MUST be unchanged
+→ a single ERROR-severity log entry MUST be emitted naming the failure
+
+### 7. Delivery Failure Does Not Halt
+
+* configure the sink to raise across many consecutive cycles
+* run the agent for `max_iterations`
+
+→ the agent MUST NOT halt due to telemetry failure
+→ `PolicyMode` MUST NOT escalate as a result of telemetry failure
+→ drift monitor state MUST NOT change as a result of telemetry failure
+
+### 8. Gate-Side and Kernel-Side Payload Parity (Migration Step 2)
+
+* during the dual-emission window, capture both gate-side and
+  kernel-side events for the same decision across a representative
+  trace corpus
+
+→ for every decision, the two payloads MUST be byte-equal modulo
+  ordering of mapping keys
+
+This test is deleted at the end of Step 3 along with the gate-side
+emission path.
+
+### 9. Replay Silence
+
+* construct a `PolicyDecision` and pass it through any replay or
+  reconstruction helper that may exist
+
+→ `emit_policy_event` MUST NOT be invoked
+
+### 10. Determinism
+
+* call `gate.evaluate()` twice with identical inputs
+
+→ the two `PolicyDecision` values MUST compare equal, including
+  `observation`
+
+### 11. Adversarial — Forgotten Emission
+
+* in a test fixture, deliberately remove the `emit_policy_event` call
+  from a kernel seam variant
+
+→ a structural test (Test 5 or its static analogue) MUST fail
+→ the failure MUST be visible in CI without manual inspection
+
+### 12. Telemetry Parameters Removed From Gate Signature (Migration Step 3)
+
+* introspect the `PolicyGate` Protocol and `DefaultPolicyGate.evaluate`
+  signatures
+
+→ MUST NOT contain `trace_id`, `step_id`, or `deterministic_nonce`
+  parameters
+
+### 13. Wrapping Is CI-Detectable (Static)
+
+* a static check (AST scan over kernel modules) MUST detect any gate
+  evaluation whose returned decision can be bound or inspected before
+  `emit_policy_event(...)` has been invoked
+
+→ in practice this means: every call to `gate.evaluate(...)` or
+  `self._policy_gate.evaluate(...)` MUST appear as the first positional
+  argument to `emit_policy_event(...)`
+
+→ a bare `decision = gate.evaluate(...)` followed by a separate
+  `emit_policy_event(decision, ...)` call MUST fail this check — even
+  though emission may in fact follow, the decision is bindable and
+  inspectable in the intervening expression, which is the trust gap
+  this ADR exists to close
+
+→ this check provides static-form coverage of Test 11. A forgotten or
+  reordered emission is detectable by AST scan in CI, not only by
+  runtime fixture. Both checks remain required.
+
+---
+
+## Compliance
+
+Any implementation that:
+
+* calls `emit_event` or any telemetry sink from inside
+  `PolicyGate.evaluate()` or any of its return paths
+* exposes `trace_id`, `step_id`, or `deterministic_nonce` parameters
+  on the `PolicyGate` Protocol or any conforming implementation
+* uses a plain `dict` for `PolicyDecision.observation` without
+  structural-immutability wrapping
+* reconstructs the observation payload at the kernel seam from inputs
+  the gate had access to, rather than reading `decision.observation`
+* invokes `emit_policy_event` outside the post-decision seam (before
+  the decision is constructed, or after enforcement has begun)
+* calls `gate.evaluate(...)` without wrapping it as the first
+  positional argument to `emit_policy_event(...)` — even if a separate
+  `emit_policy_event(decision, ...)` call follows, the unwrapped form
+  re-opens the trust gap and is non-compliant
+* permits telemetry sink failure to alter `PolicyDecision`,
+  `PolicyMode`, `ExecutionResult`, confidence state, drift state, or
+  control flow
+* permits telemetry sink failure to raise into the kernel's control
+  path
+* makes `emit_policy_event` invocation conditional on runtime state
+  other than presence of a real decision (no "skip emission under
+  load," no "skip emission for low-priority decisions")
+* retains the v0.3.0 in-gate emission path beyond Migration Step 3
+
+is **non-compliant** with this ADR.
+
+---
+
+## Relationship to Prior ADRs
+
+* **ADR-037 (Telemetry Schema)** governs the *content* of the
+  `policy.evaluate` event. This ADR governs the *site* and *mechanism*
+  of its emission. The two are orthogonal and both must be satisfied.
+* **ADR-042 (Propose/Authorize/Perform Execution Boundary)** establishes
+  the kernel as the sole enforcement seam. This ADR extends that
+  principle to telemetry: the kernel is also the sole emission seam.
+  The propose/authorize/perform boundary and the gate-authored
+  observation seam are the two named boundaries on the kernel's
+  operational perimeter.
+* **ADR-044 (Out-of-Domain Semantics for Domain Policy Gates)**
+  requires domain gates to return explicit non-EXECUTE decisions
+  rather than passing through silently. Combined with this ADR's
+  requirement that every decision produces a telemetry record, the
+  audit trail is now closed: every gate evaluation produces both an
+  explicit ruling and an exactly-once record of that ruling.
