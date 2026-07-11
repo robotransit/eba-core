@@ -6,10 +6,13 @@ Follows the one-way ingest pattern from Trace Analysis Service (ADR-045).
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .trace_types import Event, StepTrace, RunTrace
+
+logger = logging.getLogger(__name__)
 
 
 class TraceRecorder:
@@ -28,25 +31,35 @@ class TraceRecorder:
         self.current_run = RunTrace(trace_id=trace_id, objective=objective)
         self._active_trace_id = trace_id
 
-    def ingest(self, events: List[Dict[str, Any]]) -> None:
-        """Ingest plain-dict events (matches TraceAnalyzer pattern)."""
+    def ingest(self, events: List[Dict[str, Any]]) -> int:
+        """Ingest plain-dict events (matches TraceAnalyzer pattern).
+
+        Returns the number of events successfully processed.
+        """
+        processed = 0
         for raw in events:
             if not isinstance(raw, dict):
+                logger.warning("Skipping non-dict event in ingest()")
                 continue
 
-            event = Event(
-                event_type=raw.get("event_type", ""),
-                version=raw.get("version", "1.0"),
-                timestamp=raw.get("timestamp", time.time()),
-                trace_id=raw.get("trace_id", ""),
-                step_id=raw.get("step_id", ""),
-                deterministic_nonce=raw.get("deterministic_nonce", 0),
-                severity=raw.get("severity", "INFO"),
-                source=raw.get("source", ""),
-                payload=raw.get("payload", {}),
-            )
+            try:
+                event = Event(
+                    event_type=raw.get("event_type", ""),
+                    version=raw.get("version", "1.0"),
+                    timestamp=raw.get("timestamp", time.time()),
+                    trace_id=raw.get("trace_id", ""),
+                    step_id=raw.get("step_id", ""),
+                    deterministic_nonce=raw.get("deterministic_nonce", 0),
+                    severity=raw.get("severity", "INFO"),
+                    source=raw.get("source", ""),
+                    payload=raw.get("payload", {}),
+                )
+                self._process_event(event)
+                processed += 1
+            except Exception as e:
+                logger.error(f"Failed to process event: {e}")
 
-            self._process_event(event)
+        return processed
 
     def _process_event(self, event: Event) -> None:
         """Route event to current step/run."""
@@ -67,7 +80,7 @@ class TraceRecorder:
         self.current_step.events.append(event)
 
     def finalize(self) -> Optional[RunTrace]:
-        """Finalize current step and run."""
+        """Finalize current step and run. Returns the completed RunTrace."""
         if self.current_step:
             self.current_step.finalize()
             if self.current_run:
